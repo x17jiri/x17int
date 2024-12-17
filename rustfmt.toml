@@ -1,0 +1,30 @@
+# Run rustfmt with this config (it should be picked up automatically).
+version = "Two"
+edition = "2024"
+use_small_heuristics = "Max"
+max_width = 100
+#single_line_if_else_max_width = 100
+#single_line_let_else_max_width = 100
+merge_derives = true
+space_after_not = true
+hard_tabs = true
+tab_spaces = 4
+#fn_params_layout = "Compressed"
+fn_single_line = false
+hex_literal_case = "Lower"
+match_arm_blocks = true
+match_block_trailing_comma = true
+imports_granularity = "Module"
+newline_style = "Unix"
+#overflow_delimited_expr = false
+condense_wildcard_suffixes = true
+struct_lit_single_line = true
+combine_control_expr = true
+
+struct_lit_width = 40
+unstable_features = true
+use_field_init_shorthand = true
+fn_args_layout = "Compressed"
+comment_width = 100
+wrap_comments = false
+#spaces_around_ranges = true
