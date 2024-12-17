@@ -4,11 +4,14 @@
 #![feature(core_intrinsics)]
 #![feature(inherent_associated_types)]
 #![feature(generic_const_exprs)]
+#![feature(slice_ptr_get)]
 
 use std::alloc::{Allocator, Global, Layout};
 use std::intrinsics::unlikely;
 use std::num::NonZeroUsize;
 use std::ptr::{dangling, NonNull};
+
+use ll::Limb;
 
 mod ll;
 
@@ -40,7 +43,7 @@ const INLINE_BUF_SIZE: usize = 3;
 type InlineBuffer = [ll::Limb; INLINE_BUF_SIZE];
 
 impl<'a> Buffer<'a> {
-	fn new(R: &'a mut Int, size: usize, inline: &'a InlineBuffer) -> Result<Self, Error> {
+	fn new(R: &'a mut Int, size: usize, inline: &'a mut InlineBuffer) -> Result<Self, Error> {
 		if R.is_small() {
 			// R uses inline buffer, try to use OUR inline buffer instead.
 			// R's inline buffer is 1 limb long and it is unlikely to be big enough
@@ -49,7 +52,7 @@ impl<'a> Buffer<'a> {
 					neg: false,
 					len: 0,
 					cap: INLINE_BUF_SIZE,
-					limbs: inline.as_ptr() as *mut ll::Limb,
+					limbs: inline.as_mut_ptr(),
 					ownership: BufferOwneership::Inline,
 					R,
 				});
@@ -62,36 +65,19 @@ impl<'a> Buffer<'a> {
 					neg: false,
 					len: 0,
 					cap: old_cap,
-					limbs: R.__limbs_ptr_large() as *mut ll::Limb,
+					limbs: R.__limbs_ptr_large_mut(),
 					ownership: BufferOwneership::Borrowed,
 					R,
 				});
 			}
 		}
 
-		let layout = //.
-			match std::alloc::Layout::array::<ll::Limb>(size) {
-				Ok(layout) => layout,
-				_ => {
-					return Err(Error {
-						message: "Allocation failed. Cannot create Layout instance.",
-					});
-				},
-			};
-		let new_buf = //.
-			match Global.allocate(layout) {
-				Ok(new_buf) => new_buf,
-				_ => {
-					return Err(Error {
-						message: "Allocation failed. Cannot allocate memory.",
-					});
-				},
-			};
+		let new_buf = Int::__alloc(size)?;
 		Ok(Self {
 			neg: false,
 			len: 0,
-			cap: new_buf.len() / std::mem::size_of::<ll::Limb>(),
-			limbs: new_buf.as_ptr() as *mut ll::Limb,
+			cap: new_buf.len(),
+			limbs: new_buf.as_mut_ptr(),
 			ownership: BufferOwneership::Owned,
 			R,
 		})
@@ -100,52 +86,35 @@ impl<'a> Buffer<'a> {
 	fn swap(&mut self) -> Result<(), Error> {
 		match self.ownership {
 			BufferOwneership::Owned => {
-				// TODO
-				Ok(())
+				if self.len <= 1 {
+					let value = unsafe { self.limbs.read() };
+					self.R.__set_inline(value, self.neg);
+					// TODO - deallocate
+				} else {
+				}
 			},
 			BufferOwneership::Borrowed => {
-				// We used R's buffer, nothing to do
-
-				// TODO
-				Ok(())
+				// We used R's buffer, just update the length and sign
+				self.R.__set_len_neg_large(self.len, self.neg);
 			},
-			BufferOwneership::Inline if self.len <= 1 => {
-				let value = unsafe { self.limbs.read() };
-				self.R.__set_inline(value, self.neg);
-				Ok(())
-			},
-			BufferOwneership::Inline if self.len > 1 => {
-				let layout = //.
-					match std::alloc::Layout::array::<ll::Limb>(INLINE_BUF_SIZE) {
-						Ok(layout) => layout,
-						_ => {
-							return Err(Error {
-								message: "Allocation failed. Cannot create Layout instance.",
-							});
-						},
-					};
-				let new_buf = //.
-					match Global.allocate(layout) {
-						Ok(new_buf) => new_buf,
-						_ => {
-							return Err(Error {
-								message: "Allocation failed. Cannot allocate memory.",
-							});
-						},
-					};
-				unsafe {
-					std::ptr::copy_nonoverlapping(
-						self.limbs,
-						new_buf.as_ptr() as *mut ll::Limb,
-						INLINE_BUF_SIZE,
-					);
+			BufferOwneership::Inline => {
+				if self.len <= 1 {
+					let value = unsafe { self.limbs.read() };
+					self.R.__set_inline(value, self.neg);
+				} else {
+					let new_buf = Int::__alloc(INLINE_BUF_SIZE)?;
+					unsafe {
+						std::ptr::copy_nonoverlapping(
+							self.limbs,
+							new_buf.as_mut_ptr(),
+							INLINE_BUF_SIZE,
+						);
+					}
+					self.R.__set_allocated(new_buf, self.len, self.neg);
 				}
-				// TODO - the allocated buffer needs to have a header with the length
-				R.__set_allocated(new_buf, INLINE_BUF_SIZE, self.neg);
-				Ok(())
 			},
 		}
-		// TODO - set R.len and R.neg
+		Ok(())
 	}
 }
 
@@ -183,93 +152,141 @@ impl Int {
 		self.vec.addr().get() < 4
 	}
 
-	fn __limbs_ptr_small(&self) -> *const ll::Limb {
-		&self.magn as *const ll::Limb
+	fn __limbs_small(&self) -> &[ll::Limb] {
+		debug_assert!(self.is_small());
+		unsafe {
+			std::slice::from_raw_parts(
+				&self.magn as *const ll::Limb,
+				(self.magn.value != 0) as usize,
+			)
+		}
 	}
 
-	fn __limbs_ptr_large(&self) -> *const ll::Limb {
+	fn __mut_limbs_small(&mut self) -> &mut [ll::Limb] {
+		self.__limbs_small().as_mut()
+	}
+
+	fn __limbs_large(&self) -> &[ll::Limb] {
 		debug_assert!(!self.is_small());
-		let neg = self.is_negative();
-		unsafe { self.vec.offset(-(neg as isize)).as_ptr() as *const ll::Limb }
-	}
-
-	fn __limbs_ptr(&self) -> *const ll::Limb {
-		if self.is_small() {
-			self.__limbs_ptr_small() //
-		} else {
-			self.__limbs_ptr_large()
-		}
-	}
-	fn __limbs_len_small(&self) -> usize {
-		(self.magn.value != 0) as usize
-	}
-	fn __limbs_len_large(&self) -> usize {
-		self.magn.value
-	}
-
-	fn __limbs_len(&self) -> usize {
-		if self.is_small() {
-			self.__limbs_len_small() //
-		} else {
-			self.__limbs_len_large()
+		unsafe {
+			let neg = self.is_negative();
+			let bytes = self.vec.offset(-(neg as isize));
+			let ptr = bytes.cast::<ll::Limb>().as_ptr();
+			let len = self.magn.value;
+			std::slice::from_raw_parts(ptr, len)
 		}
 	}
 
-	fn __limbs_cap_small(&self) -> usize {
-		1
+	fn __limbs(&self) -> &[ll::Limb] {
+		if self.is_small() { self.__limbs_small() } else { self.__limbs_large() }
 	}
 
-	fn __limbs_cap_large(&self) -> usize {
-		unsafe { self.__limbs_ptr().offset(-1).read().value }
-	}
-
-	fn __limbs_cap(&self) -> usize {
-		if self.is_small() {
-			self.__limbs_cap_small() //
-		} else {
-			self.__limbs_cap_large()
+	fn __buf_small(&self) -> &[ll::Limb] {
+		debug_assert!(self.is_small());
+		unsafe {
+			let ptr = &self.magn as *const ll::Limb;
+			let cap = 1;
+			std::slice::from_raw_parts(ptr, cap)
 		}
+	}
+
+	fn __buf_large(&self) -> &[ll::Limb] {
+		debug_assert!(!self.is_small());
+		unsafe {
+			let neg = self.is_negative();
+			let bytes = self.vec.offset(-(neg as isize));
+			let ptr = bytes.cast::<ll::Limb>().as_ptr();
+			let cap = ptr.offset(-1).read().value;
+			std::slice::from_raw_parts(ptr, cap)
+		}
+	}
+
+	fn __buf(&self) -> &[ll::Limb] {
+		if self.is_small() { self.__buf_small() } else { self.__buf_large() }
 	}
 
 	fn __set_inline(&mut self, value: ll::Limb, neg: bool) {
 		let tag = 2 | (neg as usize);
-		self.vec =
-			unsafe { NonNull::new_unchecked(std::ptr::without_provenance::<u8>(tag) as *mut u8) };
+		let bytes = std::ptr::without_provenance_mut::<u8>(tag);
+		self.vec = unsafe { NonNull::new_unchecked(bytes) };
 		self.magn = value;
 	}
 
-	fn __set_allocated(&mut self, ptr: NonNull<ll::Limb>, len: usize, neg: bool) {
-		self.vec = unsafe { NonNull::new_unchecked(ptr.as_ptr() as *mut u8).offset(neg as isize) };
+	fn __set_allocated(&mut self, buffer: NonNull<[ll::Limb]>, len: usize, neg: bool) {
+		let bytes = buffer.cast::<u8>();
+		self.vec = unsafe { bytes.offset(neg as isize) };
 		self.magn = ll::Limb { value: len };
+	}
+
+	fn __set_len_neg_large(&mut self, len: usize, neg: bool) {
+		debug_assert!(!self.is_small());
+		debug_assert!(len <= self.__buf_large().len());
+		let prev_neg = self.is_negative();
+		let bytes = unsafe { self.vec.offset(-(prev_neg as isize)) };
+		let new_bytes = unsafe { bytes.offset(neg as isize) };
+		self.vec = new_bytes;
+		self.magn = ll::Limb { value: len };
+	}
+
+	const MAX_LIMBS: usize = usize::MAX / Limb::BITS;
+	const MAX_BITS: usize = Self::MAX_LIMBS * Limb::BITS;
+
+	fn __alloc(n: usize) -> Result<NonNull<[ll::Limb]>, Error> {
+		if n > Self::MAX_LIMBS {
+			return Err(Error {
+				message: "Allocation failed. Number of limbs exceeds the maximum.",
+			});
+		}
+
+		let layout = //.
+			match std::alloc::Layout::array::<ll::Limb>(n) {
+				Ok(layout) => layout,
+				_ => {
+					return Err(Error {
+						message: "Allocation failed. Cannot create Layout instance.",
+					});
+				},
+			};
+
+		let new_buf = //.
+			match Global.allocate(layout) {
+				Ok(new_buf) => new_buf,
+				_ => {
+					return Err(Error {
+						message: "Allocation failed. Cannot allocate memory.",
+					});
+				},
+			};
+
+		let ptr = new_buf.as_mut_ptr();
+		let ptr = ptr as *mut ll::Limb;
+		let cap = Self::MAX_LIMBS.min(new_buf.len() / std::mem::size_of::<ll::Limb>());
+		Ok(unsafe { NonNull::new_unchecked(std::slice::from_raw_parts_mut(ptr, cap)) })
+	}
+
+	fn __free(buf: NonNull<[ll::Limb]>) {
+		unsafe {
+			let ptr = buf.as_non_null_ptr().offset(-1);
+			let bytes = ptr.cast::<u8>();
+			let size = (buf.len() + 1) * std::mem::size_of::<ll::Limb>();
+			std::intrinsics::assume(size > 0);
+			let align = std::mem::align_of::<ll::Limb>();
+			let layout = Layout::from_size_align(size, align).unwrap_unchecked();
+			Global.deallocate(bytes, layout);
+		}
 	}
 
 	pub fn view<'a>(&'a self) -> IntView<'a> {
 		let neg = self.is_negative();
 		if self.is_small() {
-			IntView {
-				neg,
-				limbs: unsafe {
-					std::slice::from_raw_parts(
-						self.__limbs_ptr_small(),
-						self.__limbs_len_small(), //
-					)
-				},
-			}
+			IntView { neg, limbs: self.__limbs_small() }
 		} else {
-			IntView {
-				neg,
-				limbs: unsafe {
-					std::slice::from_raw_parts(
-						self.__limbs_ptr_large(),
-						self.__limbs_len_large(), //
-					)
-				},
-			}
+			IntView { neg, limbs: self.__limbs_large() }
 		}
 	}
 
 	pub fn bit_capacity(&self) -> usize {
-		self.__limbs_cap() * ll::Limb::BITS
+		self.__buf().len() * ll::Limb::BITS
 	}
 
 	pub fn bit_width(&self) -> usize {
@@ -365,14 +382,12 @@ impl Drop for Int {
 	fn drop(&mut self) {
 		if !self.is_small() {
 			unsafe {
-				let ptr = self.__limbs_ptr().offset(-1);
-				let size_bytes = (self.__limbs_cap() + 1) * std::mem::size_of::<ll::Limb>();
-				std::intrinsics::assume(size_bytes > 0);
-				let align = std::mem::align_of::<ll::Limb>();
-				Global.deallocate(
-					NonNull::new_unchecked(ptr as *mut u8),
-					std::alloc::Layout::from_size_align(size_bytes, align).unwrap_unchecked(),
-				);
+				let buf = self.__buf_large();
+				let ptr = buf.as_ptr();
+				let cap = buf.len();
+				let slice = std::ptr::slice_from_raw_parts(ptr, cap)
+				let mut_slice = slice as *mut [ll::Limb];
+				Self::__free(NonNull::new_unchecked(mut_slice));
 			}
 		}
 	}
