@@ -1,74 +1,70 @@
 use core::ptr::NonNull;
+use std::intrinsics::{assume, cold_path, likely, unlikely};
 use std::num::NonZeroUsize;
-use std::ptr::copy_nonoverlapping;
 
-#[derive(Clone, Copy, Default)]
-pub struct Limb {
-	pub value: usize,
-}
-
-impl Limb {
-	pub const BITS: usize = usize::BITS as usize;
-}
-
-fn has_no_overlap(a: NonNull<Limb>, a_len: usize, b: NonNull<Limb>, b_len: usize) -> bool {
-	let a_begin = a.as_ptr();
-	let b_begin = b.as_ptr();
-	let a_end = unsafe { a_begin.add(a_len) };
-	let b_end = unsafe { b_begin.add(b_len) };
-	a_end <= b_begin || b_end <= a_begin
-}
+pub use crate::blocks::Limb;
+use crate::{Error, blocks};
 
 /// Returns the number of bits needed to store the number.
 ///
 /// Preconditions:
 /// - the highest limb (if any) must be non-zero
-pub fn bit_width(a: NonNull<Limb>, n: usize) -> usize {
-	if let Some(n) = NonZeroUsize::new(n) {
-		bit_width_nonzero(a, n) //
+pub fn bit_width(a: &[Limb]) -> usize {
+	if a.is_empty() {
+		0 //
 	} else {
-		0
+		unsafe { blocks::bit_width_unchecked(a.as_ptr(), a.len()) }
 	}
 }
 
-pub fn bit_width_nonzero(a: NonNull<Limb>, n: NonZeroUsize) -> usize {
-	let n = n.get();
-	let hi = unsafe { a.offset(n as isize - 1).read().value };
-	debug_assert!(hi != 0);
-	n * Limb::BITS - (hi | 1).leading_zeros() as usize
+#[inline]
+#[must_use]
+pub fn numcpy(r: &mut [Limb], a: &[Limb]) -> Result<usize, Error> {
+	if a.is_empty() {
+		return Ok(0);
+	}
+
+	if r.len() < a.len() {
+		cold_path();
+		return Err(Error {
+			message: "ll::numcpy(): buffer too small",
+		});
+	}
+
+	unsafe { blocks::numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), a.len()) };
+	Ok(a.len())
 }
 
-/// {rp, n} = {ap, n}
-///
-/// Preconditions:
-/// - allowed overlap: none
-#[inline]
-pub unsafe fn numcpy(rp: NonNull<Limb>, ap: NonNull<Limb>, n: NonZeroUsize) {
-	debug_assert!(has_no_overlap(rp, n.get(), ap, n.get()));
+#[inline(never)]
+#[must_use]
+pub fn add(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> Result<usize, Error> {
+	// Ensure that `a` is the longer of the two
+	let (a, b) = if a.len() >= b.len() { (a, b) } else { (b, a) };
 
-	// I think there is a reasonable chance that 'n' will be
-	// just a few limbs. So try to have the code for this case inlined.
+	if r.len() < a.len() {
+		cold_path();
+		return Err(Error { message: "ll::add(): buffer too small" });
+	}
+
+	let rp = r.as_mut_ptr();
+	let ap = a.as_ptr();
+	let bp = b.as_ptr();
+	let mut carry;
 	unsafe {
-		let n = n.get();
-		if n > 0 && n <= 4 {
-			let a: usize = 0;
-			let b: usize = n >> 2;
-			let c: usize = n >> 1;
-			let d: usize = n - 1;
-
-			// n || a | b | c | d
-			// ------------------
-			// 1 || 0 | 0 | 0 | 0
-			// 2 || 0 | 0 | 1 | 1
-			// 3 || 0 | 0 | 1 | 2
-			// 4 || 0 | 1 | 2 | 3
-
-			rp.offset(a as isize).write(ap.offset(a as isize).read());
-			rp.offset(b as isize).write(ap.offset(b as isize).read());
-			rp.offset(c as isize).write(ap.offset(c as isize).read());
-			rp.offset(d as isize).write(ap.offset(d as isize).read());
+		carry = blocks::add_n_unchecked(rp, ap, bp, 0, b.len());
+		carry = blocks::add_carry_unchecked(rp, ap, carry, b.len(), a.len());
+	}
+	if carry {
+		if let Some(top) = r.get_mut(a.len()) {
+			top.value = 1;
+			Ok(a.len() + 1)
 		} else {
-			copy_nonoverlapping(ap.as_ptr(), rp.as_ptr(), n);
+			cold_path();
+			Err(Error {
+				message: "ll::add(): buffer too small for carry",
+			})
 		}
+	} else {
+		Ok(a.len())
 	}
 }

@@ -4,8 +4,11 @@
 #![feature(inherent_associated_types)]
 #![feature(generic_const_exprs)]
 #![feature(slice_ptr_get)]
+#![feature(let_chains)]
+//
 #![allow(non_snake_case)]
 #![allow(unused_imports)]
+//
 #![feature(ptr_as_ref_unchecked)]
 
 use core::panic;
@@ -15,6 +18,7 @@ use std::intrinsics::{assume, likely, unlikely};
 use std::num::NonZeroUsize;
 use std::ptr::NonNull;
 
+pub mod blocks;
 pub mod buf;
 pub mod ll;
 
@@ -38,11 +42,23 @@ struct IntView<'a> {
 	phantom: std::marker::PhantomData<&'a ll::Limb>,
 }
 
+impl<'a> IntView<'a> {
+	fn as_slice(&self) -> &'a [ll::Limb] {
+		unsafe { std::slice::from_raw_parts(self.limbs.as_ptr(), self.len) }
+	}
+}
+
 struct NonZeroIntView<'a> {
 	neg: bool,
 	len: NonZeroUsize,
 	limbs: NonNull<ll::Limb>,
 	phantom: std::marker::PhantomData<&'a ll::Limb>,
+}
+
+impl<'a> NonZeroIntView<'a> {
+	fn as_slice(&self) -> &'a [ll::Limb] {
+		unsafe { std::slice::from_raw_parts(self.limbs.as_ptr(), self.len.get()) }
+	}
 }
 
 struct BufView<'a> {
@@ -234,51 +250,6 @@ impl Int {
 		Global.deallocate(ptr.cast::<u8>(), Layout::from_size_align_unchecked(size, align));
 	}
 
-	fn __new_with_cap(cap: usize) -> Result<Self, Error> {
-		let mut R = Self::new_zero();
-		if cap > Self::ONE_LIMB {
-			let buf = Self::__alloc(cap)?;
-			unsafe { R.__set_allocated(buf, 0, false) };
-		}
-		Ok(R)
-	}
-
-	fn __reserve<'a>(&'a mut self, nlimbs: usize) -> Result<BufView<'a>, Error> {
-		// SAFETY: `self2` is needed because of a known defficiency in the borrow checker:
-		// https://stackoverflow.com/questions/38023871/returning-a-reference-from-a-hashmap-or-vec-causes-a-borrow-to-last-beyond-the-s
-		// TODO - when the defficiency is fixed, just use `self` instead of `self2`.
-		let self2 = self as *mut Self;
-
-		let mut buf_to_free = std::ptr::null_mut();
-		{
-			if let Some(buf_view) = self.__large_buf_view() {
-				if nlimbs <= buf_view.cap.get() {
-					return Ok(buf_view);
-				}
-				buf_to_free = buf_view.limbs.as_ptr();
-			} else if let Some(buf_view) = self.__small_buf_view() {
-				if nlimbs <= buf_view.cap.get() {
-					return Ok(buf_view);
-				}
-			}
-		}
-
-		let self2 = unsafe { self2.as_mut().unwrap_unchecked() };
-
-		let buf = Self::__alloc(nlimbs)?;
-		unsafe { self2.__set_allocated(buf, 0, false) };
-
-		if let Some(buf_to_free) = NonNull::new(buf_to_free) {
-			unsafe { Self::__free(buf_to_free) };
-		}
-
-		Ok(BufView {
-			cap: unsafe { NonZeroUsize::new_unchecked(buf.len()) },
-			limbs: buf.as_non_null_ptr(),
-			phantom: std::marker::PhantomData,
-		})
-	}
-
 	fn __large_view<'a>(&'a self) -> Option<IntView<'a>> {
 		if self.is_small() {
 			return None;
@@ -347,7 +318,7 @@ impl Int {
 
 	pub fn bit_width(&self) -> usize {
 		if let Some(view) = self.nonzero_view() {
-			ll::bit_width_nonzero(view.limbs, view.len)
+			ll::bit_width(view.as_slice()) //
 		} else {
 			0
 		}
@@ -356,21 +327,16 @@ impl Int {
 	#[inline(never)]
 	#[must_use]
 	pub fn try_assign(&mut self, a: &Int) -> Result<(), Error> {
-		if let Some(A) = a.nonzero_view() {
-			self.__reserve(A.len.get())?;
-			if self.is_small() {
-				self.__set_inline(unsafe { A.limbs.read() }, A.neg);
-			} else {
-				unsafe {
-					self.__set_len_neg(A.len.get(), A.neg);
-					let buf_view = self.__large_buf_view().unwrap_unchecked();
-					ll::numcpy(buf_view.limbs, A.limbs, A.len);
-				}
-			}
-		} else {
-			self.__set_inline(ll::Limb { value: 0 }, false);
+		let A = a.view();
+		let mut inline_buf = buf::InlineBuffer::default();
+		let mut buf = buf::Buffer::new(self, A.len, &mut inline_buf)?;
+
+		unsafe {
+			std::intrinsics::assume(buf.cap.get() >= A.len);
 		}
-		Ok(())
+		ll::numcpy(buf.as_slice(), A.as_slice())?;
+
+		buf.commit(A.len, A.neg)
 	}
 
 	#[inline(never)]
@@ -474,12 +440,6 @@ pub fn test_alloc(n: usize) -> Result<NonNull<[ll::Limb]>, Error> {
 	Int::__alloc(n)
 }
 
-//pub fn numcpy(rp: NonNull<Limb>, ap: NonNull<Limb>, n: usize) {
-#[inline(never)]
-pub fn test_numcpy(rp: NonNull<ll::Limb>, ap: NonNull<ll::Limb>, n: NonZeroUsize) {
-	unsafe { ll::numcpy(rp, ap, n) }
-}
-
 #[inline(never)]
 pub fn test_new_zero() -> Int {
 	Int::new_zero()
@@ -498,14 +458,4 @@ pub fn test_new_zero3() -> Option<Int> {
 #[inline(never)]
 pub fn test_view(i: &Int) -> IntView {
 	i.view()
-}
-
-#[inline(never)]
-pub fn test_new_with_cap(cap: usize) -> Result<Int, Error> {
-	Int::__new_with_cap(cap)
-}
-
-#[inline(never)]
-pub fn test_reserve(i: &mut Int, nlimbs: usize) -> Result<BufView, Error> {
-	i.__reserve(nlimbs)
 }

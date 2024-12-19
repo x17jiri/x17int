@@ -1,5 +1,6 @@
 use crate::{Error, Int, ll};
-use std::intrinsics::unlikely;
+use std::intrinsics::{assume, likely, unlikely};
+use std::num::NonZeroUsize;
 use std::ptr::{NonNull, copy_nonoverlapping};
 
 #[derive(PartialEq)]
@@ -12,6 +13,7 @@ pub enum BufferOwnership {
 pub struct Buffer<'a> {
 	pub neg: bool,
 	pub len: usize,
+	pub cap: NonZeroUsize,
 	pub limbs: NonNull<ll::Limb>,
 	ownership: BufferOwnership,
 	committed: bool,
@@ -29,6 +31,7 @@ impl<'a> Buffer<'a> {
 				return Ok(Self {
 					neg: false,
 					len: 0,
+					cap: buf_view.cap,
 					limbs: buf_view.limbs,
 					ownership: BufferOwnership::Borrowed,
 					committed: false,
@@ -42,6 +45,7 @@ impl<'a> Buffer<'a> {
 				return Ok(Self {
 					neg: false,
 					len: 0,
+					cap: NonZeroUsize::new(INLINE_BUF_SIZE).unwrap(),
 					limbs: NonNull::from(&inline[0]),
 					ownership: BufferOwnership::Inline,
 					committed: false,
@@ -54,6 +58,7 @@ impl<'a> Buffer<'a> {
 		Ok(Self {
 			neg: false,
 			len: 0,
+			cap: unsafe { NonZeroUsize::new_unchecked(new_buf.len()) },
 			limbs: new_buf.as_non_null_ptr(),
 			ownership: BufferOwnership::Owned,
 			committed: false,
@@ -114,6 +119,10 @@ impl<'a> Buffer<'a> {
 		if self.ownership == BufferOwnership::Owned {
 			unsafe { Int::__free(self.limbs) };
 		}
+	}
+
+	pub fn as_slice(&mut self) -> &mut [ll::Limb] {
+		unsafe { std::slice::from_raw_parts_mut(self.limbs.as_ptr(), self.cap.get()) }
 	}
 }
 
