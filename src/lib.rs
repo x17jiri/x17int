@@ -8,31 +8,32 @@
 //
 #![allow(non_snake_case)]
 #![allow(unused_imports)]
+#![allow(internal_features)]
+#![allow(incomplete_features)]
 //
 #![feature(ptr_as_ref_unchecked)]
 
 use core::panic;
 use std::alloc::{Allocator, Global, Layout};
 use std::char::MAX;
-use std::intrinsics::{assume, likely, unlikely};
+use std::intrinsics::{assume, cold_path, likely, unlikely};
 use std::num::NonZeroUsize;
 use std::ptr::NonNull;
 
 pub mod blocks;
 pub mod buf;
+pub mod error;
 pub mod ll;
 
 use buf::{Buffer, InlineBuffer};
+use error::{Error, ErrorKind, assert};
 use ll::Limb;
 
-pub struct Error {
-	pub message: &'static str,
-}
-
-impl std::fmt::Debug for Error {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.write_str(self.message)
-	}
+#[macro_export]
+macro_rules! testvec {
+	($($x:expr),* $(,)?) => {
+		vec![$(Limb { value: $x }),*]
+	};
 }
 
 struct IntView<'a> {
@@ -203,31 +204,19 @@ impl Int {
 	#[must_use]
 	#[inline(never)]
 	fn __alloc(n: usize) -> Result<NonNull<[ll::Limb]>, Error> {
-		if n > Self::MAX_LIMBS {
-			return Err(Error {
-				message: "Allocation failed. Number of limbs exceeds the maximum.",
-			});
-		}
+		assert(n <= Self::MAX_LIMBS, || {
+			Error::new_alloc_failed("Number of limbs exceeds the maximum.")
+		})?;
 
-		let layout = //.
-			match std::alloc::Layout::array::<ll::Limb>(n) {
-				Ok(layout) => layout,
-				_ => {
-					return Err(Error {
-						message: "Allocation failed. Cannot create Layout instance.",
-					});
-				},
-			};
+		let layout = std::alloc::Layout::array::<ll::Limb>(n).map_err(|_| {
+			cold_path();
+			Error::new_alloc_failed("Cannot create Layout instance.")
+		})?;
 
-		let new_buf = //.
-			match Global.allocate(layout) {
-				Ok(new_buf) => new_buf,
-				_ => {
-					return Err(Error {
-						message: "Allocation failed. Cannot allocate memory.",
-					});
-				},
-			};
+		let new_buf = Global.allocate(layout).map_err(|_| {
+			cold_path();
+			Error::new_alloc_failed("Cannot allocate memory.")
+		})?;
 
 		let ptr = new_buf.as_non_null_ptr();
 		let ptr = ptr.cast::<ll::Limb>().as_ptr();
@@ -456,6 +445,7 @@ pub fn test_new_zero3() -> Option<Int> {
 }
 
 #[inline(never)]
+#[allow(private_interfaces)]
 pub fn test_view(i: &Int) -> IntView {
 	i.view()
 }

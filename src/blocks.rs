@@ -1,4 +1,6 @@
-#[derive(Clone, Copy, Default, PartialEq, Debug)]
+use std::intrinsics::{assume, cold_path};
+
+#[derive(Clone, Copy, Default, PartialEq, Debug, PartialOrd)]
 pub struct Limb {
 	pub value: usize,
 }
@@ -68,6 +70,29 @@ pub unsafe fn numcpy_unchecked(rp: *mut Limb, ap: *const Limb, n: usize) {
 	}
 }
 
+pub unsafe fn trim_unchecked(p: *const Limb, i: usize, mut n: usize) -> usize {
+	while n > i && p.add(n - 1).read().value == 0 {
+		n -= 1;
+	}
+	n
+}
+
+#[inline(always)]
+pub unsafe fn cold_trim_unchecked(p: *const Limb, i: usize, mut n: usize) -> usize {
+	if i >= n {
+		return n;
+	}
+
+	if p.add(n - 1).read().value == 0 {
+		cold_path();
+		n -= 1;
+		while i < n && p.add(n - 1).read().value == 0 {
+			n -= 1;
+		}
+	}
+	n
+}
+
 #[inline]
 pub unsafe fn add3(a: Limb, b: Limb, carry: bool) -> (Limb, bool) {
 	let (sum, overflow1) = a.value.overflowing_add(b.value);
@@ -104,7 +129,7 @@ pub unsafe fn add_carry_unchecked(
 		}
 
 		let a = ap.add(i).read();
-		let s = a.value + 1;
+		let s = a.value.wrapping_add(1);
 		rp.add(i).write(Limb { value: s });
 		carry = s == 0;
 
@@ -191,29 +216,24 @@ pub unsafe fn sub_1_unchecked(rp: *mut Limb, ap: *const Limb, i: usize, n: usize
 mod tests {
 	use super::*;
 
-	#[macro_export]
-	macro_rules! limbvec {
-		($($x:expr),* $(,)?) => {
-			vec![$(Limb { value: $x }),*]
-		};
-	}
+	use crate::testvec;
 
 	#[test]
 	fn test_bit_width() {
 		unsafe {
-			let a = limbvec![0x12345678];
+			let a = testvec![0x12345678];
 			assert_eq!(bit_width_unchecked(a.as_ptr(), a.len()), 29);
 
-			let a = limbvec![0];
+			let a = testvec![0];
 			assert_eq!(bit_width_unchecked(a.as_ptr(), a.len()), 1);
 
-			let a = limbvec![0, 0];
+			let a = testvec![0, 0];
 			assert_eq!(bit_width_unchecked(a.as_ptr(), a.len()), Limb::BITS + 1);
 
-			let a = limbvec![0, Limb::MAX];
+			let a = testvec![0, Limb::MAX];
 			assert_eq!(bit_width_unchecked(a.as_ptr(), a.len()), 2 * Limb::BITS);
 
-			let a = limbvec![111, Limb::MAX, 0x12345678];
+			let a = testvec![111, Limb::MAX, 0x12345678];
 			assert_eq!(bit_width_unchecked(a.as_ptr(), a.len()), 2 * Limb::BITS + 29);
 		}
 	}
@@ -221,31 +241,31 @@ mod tests {
 	#[test]
 	fn test_numcpy() {
 		unsafe {
-			let a = limbvec![15, 17, 19, 21, 23, 25, 27, 29, 31, 33];
-			let mut r = limbvec![0, 0];
+			let a = testvec![15, 17, 19, 21, 23, 25, 27, 29, 31, 33];
+			let mut r = testvec![0, 0];
 			numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 1);
-			assert_eq!(r, limbvec![15, 0]);
+			assert_eq!(r, testvec![15, 0]);
 
-			let mut r = limbvec![1, 2, 3];
+			let mut r = testvec![1, 2, 3];
 			numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 2);
-			assert_eq!(r, limbvec![15, 17, 3]);
+			assert_eq!(r, testvec![15, 17, 3]);
 
-			let mut r = limbvec![1, 2, 3, 4, 5, 6, 7, 8];
+			let mut r = testvec![1, 2, 3, 4, 5, 6, 7, 8];
 			numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 3);
-			assert_eq!(r, limbvec![15, 17, 19, 4, 5, 6, 7, 8]);
+			assert_eq!(r, testvec![15, 17, 19, 4, 5, 6, 7, 8]);
 
-			let mut r = limbvec![1, 2, 3, 4, 5, 6, 7, 18];
+			let mut r = testvec![1, 2, 3, 4, 5, 6, 7, 18];
 			numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 4);
-			assert_eq!(r, limbvec![15, 17, 19, 21, 5, 6, 7, 18]);
+			assert_eq!(r, testvec![15, 17, 19, 21, 5, 6, 7, 18]);
 
-			let mut r = limbvec![1, 2, 3, 4, 5, 6, 227, 18];
+			let mut r = testvec![1, 2, 3, 4, 5, 6, 227, 18];
 			numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 5);
-			assert_eq!(r, limbvec![15, 17, 19, 21, 23, 6, 227, 18]);
+			assert_eq!(r, testvec![15, 17, 19, 21, 23, 6, 227, 18]);
 
-			let a = limbvec![115, 17, 119, 21, 123, 25, 127, 29, 131, 33];
-			let mut r = limbvec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+			let a = testvec![115, 17, 119, 21, 123, 25, 127, 29, 131, 33];
+			let mut r = testvec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
 			numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 10);
-			assert_eq!(r, limbvec![115, 17, 119, 21, 123, 25, 127, 29, 131, 33, 11, 12, 13]);
+			assert_eq!(r, testvec![115, 17, 119, 21, 123, 25, 127, 29, 131, 33, 11, 12, 13]);
 		}
 	}
 
@@ -295,43 +315,129 @@ mod tests {
 			let TWO_THIRDS: Limb::Value = Limb::MAX - THIRD;
 			let MAX: Limb::Value = Limb::MAX;
 
-			let a = limbvec![HALF, 1, 2, 3, TWO_THIRDS, MAX, MAX];
-			let b = limbvec![TWO_THIRDS, 1, 2, 3, HALF, MAX, 0];
-			let mut r = limbvec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+			let a = testvec![HALF, 1, 2, 3, TWO_THIRDS, MAX, MAX];
+			let b = testvec![TWO_THIRDS, 1, 2, 3, HALF, MAX, 0];
+			let mut r = testvec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 			let carry = add_n_unchecked(r.as_mut_ptr(), a.as_ptr(), b.as_ptr(), 0, 7);
-			assert_eq!(r, limbvec![
-				TWO_THIRDS - (Limb::MAX - HALF + 1),
-				3,
-				4,
-				6,
-				TWO_THIRDS - (Limb::MAX - HALF + 1),
-				MAX,
-				0,
-				7,
-				8,
-				9,
-				10
-			]);
+			assert_eq!(
+				r,
+				testvec![
+					TWO_THIRDS - (Limb::MAX - HALF + 1),
+					3,
+					4,
+					6,
+					TWO_THIRDS - (Limb::MAX - HALF + 1),
+					MAX,
+					0,
+					7,
+					8,
+					9,
+					10
+				]
+			);
 			assert_eq!(carry, true);
 
-			let a = limbvec![HALF, 1, 2, 3, TWO_THIRDS, MAX, TWO_THIRDS];
-			let b = limbvec![TWO_THIRDS, 1, 2, 3, HALF, MAX, 0];
-			let mut r = limbvec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+			let a = testvec![HALF, 1, 2, 3, TWO_THIRDS, MAX, TWO_THIRDS];
+			let b = testvec![TWO_THIRDS, 1, 2, 3, HALF, MAX, 0];
+			let mut r = testvec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 			let carry = add_n_unchecked(r.as_mut_ptr(), a.as_ptr(), b.as_ptr(), 0, 7);
-			assert_eq!(r, limbvec![
-				TWO_THIRDS - (Limb::MAX - HALF + 1),
-				3,
-				4,
-				6,
-				TWO_THIRDS - (Limb::MAX - HALF + 1),
-				MAX,
-				TWO_THIRDS + 1,
-				7,
-				8,
-				9,
-				10
-			]);
+			assert_eq!(
+				r,
+				testvec![
+					TWO_THIRDS - (Limb::MAX - HALF + 1),
+					3,
+					4,
+					6,
+					TWO_THIRDS - (Limb::MAX - HALF + 1),
+					MAX,
+					TWO_THIRDS + 1,
+					7,
+					8,
+					9,
+					10
+				]
+			);
 			assert_eq!(carry, false);
+		}
+	}
+
+	#[test]
+	fn test_add_carry() {
+		unsafe {
+			let THIRD: Limb::Value = Limb::MAX / 3;
+			let HALF: Limb::Value = Limb::MAX / 2;
+			let TWO_THIRDS: Limb::Value = Limb::MAX - THIRD;
+			let MAX: Limb::Value = Limb::MAX;
+
+			let a = testvec![HALF, 1, 2, 3, TWO_THIRDS, MAX, MAX];
+			let mut r = testvec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+			let carry = add_carry_unchecked(r.as_mut_ptr(), a.as_ptr(), false, 0, 7);
+			assert_eq!(r, testvec![HALF, 1, 2, 3, TWO_THIRDS, MAX, MAX, 7, 8, 9, 10]);
+			assert_eq!(carry, false);
+
+			let carry = add_carry_unchecked(r.as_mut_ptr(), a.as_ptr(), true, 0, 7);
+			assert_eq!(r, testvec![HALF + 1, 1, 2, 3, TWO_THIRDS, MAX, MAX, 7, 8, 9, 10]);
+			assert_eq!(carry, false);
+
+			let a = testvec![MAX, 1, 2, 3, TWO_THIRDS, MAX, MAX];
+			let mut r = testvec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+			let carry = add_carry_unchecked(r.as_mut_ptr(), a.as_ptr(), false, 0, 7);
+			assert_eq!(r, testvec![MAX, 1, 2, 3, TWO_THIRDS, MAX, MAX, 7, 8, 9, 10]);
+			assert_eq!(carry, false);
+
+			let carry = add_carry_unchecked(r.as_mut_ptr(), a.as_ptr(), true, 0, 7);
+			assert_eq!(r, testvec![0, 2, 2, 3, TWO_THIRDS, MAX, MAX, 7, 8, 9, 10]);
+			assert_eq!(carry, false);
+
+			let a = testvec![MAX, MAX, 2, 3, TWO_THIRDS, MAX, MAX];
+			let mut r = testvec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+			let carry = add_carry_unchecked(r.as_mut_ptr(), a.as_ptr(), false, 0, 7);
+			assert_eq!(r, testvec![MAX, MAX, 2, 3, TWO_THIRDS, MAX, MAX, 7, 8, 9, 10]);
+			assert_eq!(carry, false);
+
+			let carry = add_carry_unchecked(r.as_mut_ptr(), a.as_ptr(), true, 0, 7);
+			assert_eq!(r, testvec![0, 0, 3, 3, TWO_THIRDS, MAX, MAX, 7, 8, 9, 10]);
+			assert_eq!(carry, false);
+
+			let a = testvec![MAX, MAX, MAX, MAX, MAX, MAX, MAX];
+			let mut r = testvec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+			let carry = add_carry_unchecked(r.as_mut_ptr(), a.as_ptr(), false, 0, 7);
+			assert_eq!(r, testvec![MAX, MAX, MAX, MAX, MAX, MAX, MAX, 7, 8, 9, 10]);
+			assert_eq!(carry, false);
+
+			let carry = add_carry_unchecked(r.as_mut_ptr(), a.as_ptr(), true, 0, 7);
+			assert_eq!(r, testvec![0, 0, 0, 0, 0, 0, 0, 7, 8, 9, 10]);
+			assert_eq!(carry, true);
+		}
+	}
+
+	#[test]
+	fn test_add_1() {
+		unsafe {
+			let HALF: Limb::Value = Limb::MAX / 2;
+			let TWO_THIRDS: Limb::Value = Limb::MAX / 3 * 2;
+			let MAX: Limb::Value = Limb::MAX;
+
+			let a = testvec![HALF, 1, 2, 3, TWO_THIRDS, MAX, MAX];
+			let mut r = testvec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+			let carry = add_1_unchecked(r.as_mut_ptr(), a.as_ptr(), 0, 7, Limb { value: HALF });
+			assert_eq!(r, testvec![HALF + HALF, 1, 2, 3, TWO_THIRDS, MAX, MAX, 7, 8, 9, 10]);
+			assert_eq!(carry, false);
+
+			let a = testvec![TWO_THIRDS, 1, 2, 3, TWO_THIRDS, MAX, MAX];
+			let mut r = testvec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+			let carry = add_1_unchecked(r.as_mut_ptr(), a.as_ptr(), 0, 7, Limb { value: HALF });
+			assert_eq!(
+				r,
+				testvec![TWO_THIRDS - (MAX - HALF) - 1, 2, 2, 3, TWO_THIRDS, MAX, MAX, 7, 8, 9, 10]
+			);
+			assert_eq!(carry, false);
+
+			let a = testvec![TWO_THIRDS, MAX, MAX, MAX, MAX, MAX, MAX];
+			let mut r = testvec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+			let carry = add_1_unchecked(r.as_mut_ptr(), a.as_ptr(), 0, 7, Limb { value: HALF });
+			assert_eq!(r, testvec![TWO_THIRDS - (MAX - HALF) - 1, 0, 0, 0, 0, 0, 0, 7, 8, 9, 10]);
+			assert_eq!(carry, true);
 		}
 	}
 }

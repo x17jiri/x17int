@@ -1,4 +1,5 @@
-use crate::{Error, Int, ll};
+use crate::error::{Error, ErrorKind};
+use crate::{Int, ll};
 use std::intrinsics::{assume, likely, unlikely};
 use std::num::NonZeroUsize;
 use std::ptr::{NonNull, copy_nonoverlapping};
