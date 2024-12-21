@@ -1,8 +1,8 @@
 use crate::error::{Error, ErrorKind};
-use crate::{Int, ll};
+use crate::{ll, Int};
 use std::intrinsics::{assume, likely, unlikely};
 use std::num::NonZeroUsize;
-use std::ptr::{NonNull, copy_nonoverlapping};
+use std::ptr::{copy_nonoverlapping, NonNull};
 
 #[derive(PartialEq)]
 pub enum BufferOwnership {
@@ -55,6 +55,7 @@ impl<'a> Buffer<'a> {
 			}
 		}
 
+		let size = unsafe { NonZeroUsize::new_unchecked(size) };
 		let new_buf = Int::__alloc(size)?;
 		Ok(Self {
 			neg: false,
@@ -87,7 +88,7 @@ impl<'a> Buffer<'a> {
 						self.R.__set_inline(value, neg);
 					}
 				} else {
-					let new_buf = Int::__alloc(INLINE_BUF_SIZE)?;
+					let new_buf = Int::__alloc(NonZeroUsize::new(INLINE_BUF_SIZE).unwrap())?;
 					unsafe {
 						std::ptr::copy_nonoverlapping(
 							self.limbs.as_ptr(),

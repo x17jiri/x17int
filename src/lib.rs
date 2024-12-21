@@ -27,7 +27,7 @@ pub mod ll;
 
 use buf::{Buffer, InlineBuffer};
 use error::{assert, Error, ErrorKind};
-use ll::Limb;
+use ll::{numcpy_est, Limb};
 
 #[macro_export]
 macro_rules! testvec {
@@ -203,7 +203,8 @@ impl Int {
 
 	#[must_use]
 	#[inline(never)]
-	fn __alloc(n: usize) -> Result<NonNull<[ll::Limb]>, Error> {
+	fn __alloc(n: NonZeroUsize) -> Result<NonNull<[ll::Limb]>, Error> {
+		let n = n.get();
 		assert(n <= Self::MAX_LIMBS, || {
 			Error::new_alloc_failed("Number of limbs exceeds the maximum.")
 		})?;
@@ -317,15 +318,14 @@ impl Int {
 	#[must_use]
 	pub fn try_assign(&mut self, a: &Int) -> Result<(), Error> {
 		let A = a.view();
+		let buf_size = numcpy_est(A.as_slice());
 		let mut inline_buf = buf::InlineBuffer::default();
-		let mut buf = buf::Buffer::new(self, A.len, &mut inline_buf)?;
+		let mut buf = buf::Buffer::new(self, buf_size, &mut inline_buf)?;
 
-		unsafe {
-			std::intrinsics::assume(buf.cap.get() >= A.len);
-		}
-		let a_len = ll::numcpy(buf.as_slice(), A.as_slice())?;
+		let r_len = ll::numcpy(buf.as_slice(), A.as_slice())?;
+		let r_neg = A.neg;
 
-		buf.commit(a_len, A.neg)
+		buf.commit(r_len, r_neg)
 	}
 
 	#[inline(never)]
@@ -333,72 +333,33 @@ impl Int {
 		self.try_assign(a).unwrap()
 	}
 
-	/*#[inline(never)]
-	fn add_or_sub(&mut self, a: &Int, sub: bool, b: &Int) {
+	#[inline(never)]
+	#[must_use]
+	pub fn try_add_or_sub(&mut self, a: &Int, sub: bool, b: &Int) -> Result<(), Error> {
 		let A = a.view();
-		let mut B = b.view();
-		B.neg ^= sub;
+		let B = b.view();
+		let sub = A.neg ^ (sub ^ B.neg);
+		let buf_size = if sub {
+			ll::sub_est(A.as_slice(), B.as_slice())
+		} else {
+			ll::add_est(A.as_slice(), B.as_slice())
+		};
+		let mut inline_buf = buf::InlineBuffer::default();
+		let mut buf = buf::Buffer::new(self, buf_size, &mut inline_buf)?;
 
-		let sub = A.neg ^ B.neg;
+		let mut r_neg = A.neg;
+		let r_len;
+		if sub {
+			let (neg, len) = ll::sub(buf.as_slice(), A.as_slice(), B.as_slice())?;
+			r_neg ^= neg;
+			r_len = len;
+		} else {
+			r_len = ll::add(buf.as_slice(), A.as_slice(), B.as_slice())?;
+		};
 
-		let (mut A, mut B) = if A.limbs.len() < B.limbs.len() { (B, A) } else { (A, B) };
-		let mut out_neg = A.neg;
-
-		//if B.limbs.is_empty() {
-		//	A.limbs = if out_sign < 0 { &[] } else { A.limbs };
-		//	return;
-		//}
-		//
-		//let out_len = A.limbs.len() + (op >= 0) as usize;
-		//let mut out = Vec::with_capacity(out_len);
-		//unsafe { out.set_len(out_len) };
-		//
-		//if op >= 0 {
-		//	ll::m_abs_add(&mut out, A.limbs, B.limbs);
-		//} else {
-		//	ll::m_abs_sub(&mut out, A.limbs, B.limbs, out_sign);
-		//}
-		//
-		//R.vec = NonNull::new(out.as_mut_ptr()).unwrap();
-		//R.magn = ll::Limb { value: out_sign };
-	}*/
+		buf.commit(r_len, r_neg)
+	}
 }
-
-/*[[X17_NO_INLINE]]
-Integer &add_or_sub(Integer &R, Int_view A_, Count op, Int_view B_) {
-	Index A_sign = A_.m_len;
-	Abs_int_view A = A_;
-
-	Index B_sign = op ^ B_.m_len; // NOLINT(*-signed-bitwise)
-	Abs_int_view B = B_;
-
-	op = A_sign ^ B_sign; // NOLINT(*-signed-bitwise)
-
-	if (A.m_len < B.m_len) {
-		boost::swap(A, B);
-		boost::swap(A_sign, B_sign);
-	}
-	Index out_sign = A_sign;
-
-	if (B.m_len == 0) {
-		A.m_len = out_sign < 0 ? -A.m_len : A.m_len;
-		return assign(R, A);
-	}
-
-	// subtraction cannot overflow, so no need to add 1 for op < 0
-	Out_buf::Local_buffer out_loc_buf;
-	Out_buf out(R, A.m_len + (op >= 0), out_loc_buf);
-
-	if (op >= 0) {
-		m_abs_add(out, A, B);
-	} else {
-		m_abs_sub(out, A, B, out_sign);
-	}
-
-	out.swap(out_sign);
-	return R;
-}
-*/
 
 impl Drop for Int {
 	fn drop(&mut self) {
@@ -425,7 +386,7 @@ pub fn test_commit(b: &mut Buffer, len: usize, neg: bool) -> Result<(), Error> {
 }
 
 #[inline(never)]
-pub fn test_alloc(n: usize) -> Result<NonNull<[ll::Limb]>, Error> {
+pub fn test_alloc(n: NonZeroUsize) -> Result<NonNull<[ll::Limb]>, Error> {
 	Int::__alloc(n)
 }
 

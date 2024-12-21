@@ -5,7 +5,7 @@
 // - They provide "strong exception safety". If an error is returned, the output buffer
 //   is left unchanged.
 //
-// - Some of them may allocate scratch space on the heap. This is always documented.
+// - Some of them may allocate scratch space on the heap. If it happens, it is documented.
 //   If there is allocation failure, an error is returned and the output buffer is left unchanged.
 //
 // - They don't allocate memory for the result. The caller provides a fixed-size buffer
@@ -19,6 +19,8 @@
 //     - r[0 ..< len] contains the result with any leading zeros trimmed
 //	   - r[len ..< est_len] may be overwritten
 //	   - r[est_len .. ] is left unchanged
+//
+// - If the inputs don't have any leading zeros, the outputs won't have them either
 
 use core::ptr::NonNull;
 use std::intrinsics::{assume, cold_path, likely, unlikely};
@@ -42,25 +44,14 @@ pub fn numcpy_est(a: &[Limb]) -> usize {
 	a.len()
 }
 
-/// In order to be consistent with other functions, this also trims the leading zeros.
-///
-/// It always copies the entire input buffer and only then does the trimming.
-///
-/// If you don't need trimming, just ignore the return value. As long as the function is inlined,
-/// the compiler should figure out it's dead code and optimize it away.
 #[inline(never)]
 #[must_use]
 pub fn numcpy(r: &mut [Limb], a: &[Limb]) -> Result<usize, Error> {
-	if a.is_empty() {
-		return Ok(0);
-	}
-
 	assert(r.len() >= a.len(), || Error::new_buffer_too_small("ll::numcpy()"))?;
-
 	unsafe {
 		blocks::numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 0, a.len());
-		Ok(blocks::cold_trim_unchecked(r.as_mut_ptr(), 0, a.len()))
 	}
+	Ok(a.len())
 }
 
 #[inline]
@@ -72,7 +63,7 @@ pub fn add_est(a: &[Limb], b: &[Limb]) -> usize {
 #[inline(never)]
 #[must_use]
 pub fn add(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> Result<usize, Error> {
-	// Ensure that `a` is the longer of the two numbers
+	// Ensure that `a` is not shorter than `b`
 	let (a, b) = if a.len() >= b.len() { (a, b) } else { (b, a) };
 
 	assert(r.len() > a.len(), || Error::new_buffer_too_small("ll::add()"))?;
@@ -86,8 +77,7 @@ pub fn add(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> Result<usize, Error> {
 		let carry = blocks::add_n_unchecked(rp, ap, bp, 0, bn);
 		let carry = blocks::add_carry_unchecked(rp, ap, carry, bn, an);
 		r.get_unchecked_mut(an).value = carry as Limb::Value;
-		let rn = an + (carry as usize);
-		Ok(blocks::cold_trim_unchecked(rp, 0, rn))
+		Ok(an + (carry as usize))
 	}
 }
 
@@ -111,14 +101,14 @@ fn __prep_sub<'a>(a: &'a [Limb], b: &'a [Limb]) -> (bool, &'a [Limb], &'a [Limb]
 		let (a, b) = if swapped { (b, a) } else { (a, b) };
 
 		unsafe {
-			assume(a.len() > b.len());
-			if a[a.len() - 1].value != 0 {
+			if a.get_unchecked(a.len() - 1).value != 0 {
 				// The highest limb of A is non-zero. We're done.
 				return (swapped, a, b);
 			} else {
 				// The highest limb of A is zero. We need to trim it.
 				cold_path();
 
+				assume(a.len() > b.len());
 				let a_len = blocks::trim_unchecked(a.as_ptr(), b.len(), a.len() - 1);
 				if a_len > b.len() {
 					return (swapped, a.get_unchecked(..a_len), b);
@@ -159,6 +149,7 @@ pub fn sub_est(a: &[Limb], b: &[Limb]) -> usize {
 #[inline(never)]
 #[must_use]
 pub fn sub(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> Result<(bool, usize), Error> {
+	// Ensure that `a` is not smaller than `b`
 	let (swapped, a, b) = __prep_sub(a, b);
 
 	assert(r.len() >= a.len(), || Error::new_buffer_too_small("ll::sub()"))?;

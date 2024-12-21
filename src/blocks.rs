@@ -84,6 +84,16 @@ pub unsafe fn numcpy_unchecked(rp: *mut Limb, ap: *const Limb, i: usize, n: usiz
 	}
 }
 
+#[inline]
+pub unsafe fn negcpy_unchecked(rp: *mut Limb, ap: *const Limb, i: usize, n: usize) {
+	debug_assert!(i <= n);
+	debug_assert!(rp as *const Limb == ap || has_no_overlap(rp, n, ap, n));
+
+	for i in i..n {
+		rp.add(i).write(Limb { value: !ap.add(i).read().value });
+	}
+}
+
 pub unsafe fn trim_unchecked(p: *const Limb, i: usize, mut n: usize) -> usize {
 	debug_assert!(i <= n);
 	while n != i && p.add(n - 1).read().value == 0 {
@@ -140,8 +150,8 @@ pub unsafe fn add_carry_unchecked(
 			return true;
 		}
 
-		let a = ap.add(i).read();
-		let s = a.value.wrapping_add(1);
+		let a = ap.add(i).read().value;
+		let s = a.wrapping_add(1);
 		rp.add(i).write(Limb { value: s });
 		carry = s == 0;
 
@@ -152,7 +162,30 @@ pub unsafe fn add_carry_unchecked(
 	false
 }
 
-pub unsafe fn add_1_unchecked(rp: *mut Limb, ap: *const Limb, i: usize, n: usize, b: Limb) -> bool {
+pub unsafe fn neg_add_carry_unchecked(
+	rp: *mut Limb, ap: *const Limb, mut carry: bool, i: usize, n: usize,
+) -> bool {
+	debug_assert!(rp as *const Limb == ap || has_no_overlap(rp, n, ap, n));
+
+	let mut i = i;
+	while carry {
+		if i == n {
+			return true;
+		}
+
+		let a = !ap.add(i).read().value;
+		let s = a.wrapping_add(1);
+		rp.add(i).write(Limb { value: s });
+		carry = s == 0;
+
+		i += 1;
+	}
+
+	negcpy_unchecked(rp, ap, i, n);
+	false
+}
+
+pub unsafe fn add_1_unchecked(rp: *mut Limb, ap: *const Limb, b: Limb, i: usize, n: usize) -> bool {
 	debug_assert!(i < n);
 	// TODO - when checking overlap, we should consider `i` as well
 	debug_assert!(rp as *const Limb == ap || has_no_overlap(rp, n, ap, n));
@@ -209,7 +242,7 @@ pub unsafe fn sub_borrow_unchecked(
 	false
 }
 
-pub unsafe fn sub_1_unchecked(rp: *mut Limb, ap: *const Limb, i: usize, n: usize, b: Limb) -> bool {
+pub unsafe fn sub_1_unchecked(rp: *mut Limb, ap: *const Limb, b: Limb, i: usize, n: usize) -> bool {
 	debug_assert!(i < n);
 	// TODO - when checking overlap, we should consider `i` as well
 	debug_assert!(rp as *const Limb == ap || has_no_overlap(rp, n, ap, n));
