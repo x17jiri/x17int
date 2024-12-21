@@ -12,85 +12,97 @@ impl Limb {
 }
 
 #[inline]
-fn has_no_overlap(a: *const Limb, a_len: usize, b: *const Limb, b_len: usize) -> bool {
+fn has_overlap(a: *const Limb, a_len: usize, b: *const Limb, b_len: usize) -> bool {
 	let a_end = unsafe { a.add(a_len) };
 	let b_end = unsafe { b.add(b_len) };
-	a_end <= b || b_end <= a
+	a_end > b && b_end > a
+}
+
+#[inline]
+fn has_no_overlap(a: *const Limb, a_len: usize, b: *const Limb, b_len: usize) -> bool {
+	!has_overlap(a, a_len, b, b_len)
 }
 
 /// Returns the number of bits needed to store the number.
 ///
 /// Preconditions:
-/// - n > 0
 /// - a[0..<n] is a valid slice
-/// - a[n - 1] is non-zero
+/// - if n > 0, then a[n - 1] is non-zero
 ///
 /// If the highest limb is zero, the result is as if the limb was 1. This is
 /// technically incorrect, but the behavior is defined.
 #[inline]
 pub unsafe fn bit_width_unchecked(a: *const Limb, n: usize) -> usize {
-	debug_assert!(n > 0);
-	let hi = unsafe { a.offset(n as isize - 1).read().value };
-	n * Limb::BITS - (hi | 1).leading_zeros() as usize
+	if n == 0 {
+		0
+	} else {
+		let hi = unsafe { a.offset(n as isize - 1).read().value };
+		n * Limb::BITS - (hi | 1).leading_zeros() as usize
+	}
 }
 
-/// {rp, n} = {ap, n}
+/// rp[i..<n] = ap[i..<n]
 ///
 /// Preconditions:
-/// - if n > 0, then rp[0..<n] and ap[0..<n] are valid slices
-/// - allowed overlap: none
+/// - i <= n
+/// - rp[0..<n] and ap[0..<n] are valid slices
+/// - allowed overlap: rp == ap or no overlap
 #[inline]
-pub unsafe fn numcpy_unchecked(rp: *mut Limb, ap: *const Limb, n: usize) {
-	debug_assert!(n > 0);
-	debug_assert!(has_no_overlap(rp, n, ap, n));
+pub unsafe fn numcpy_unchecked(rp: *mut Limb, ap: *const Limb, i: usize, n: usize) {
+	debug_assert!(i <= n);
+	debug_assert!(rp as *const Limb == ap || has_no_overlap(rp, n, ap, n));
+
+	if i == n || rp as *const Limb == ap {
+		return;
+	}
+
+	let rp = rp.add(i);
+	let ap = ap.add(i);
+	let n = n.unchecked_sub(i);
 
 	// I think there is a reasonable chance that 'n' will be
 	// just a few limbs. So try to have the code for this case inlined.
-	unsafe {
-		if n <= 4 {
-			let a: usize = 0;
-			let b: usize = n >> 2;
-			let c: usize = n >> 1;
-			let d: usize = n - 1;
+	if n <= 4 {
+		let a: usize = 0;
+		let b: usize = n >> 2;
+		let c: usize = n >> 1;
+		let d: usize = n - 1;
 
-			// n || a | b | c | d
-			// ------------------
-			// 1 || 0 | 0 | 0 | 0
-			// 2 || 0 | 0 | 1 | 1
-			// 3 || 0 | 0 | 1 | 2
-			// 4 || 0 | 1 | 2 | 3
+		// n || a | b | c | d
+		// ------------------
+		// 1 || 0 | 0 | 0 | 0
+		// 2 || 0 | 0 | 1 | 1
+		// 3 || 0 | 0 | 1 | 2
+		// 4 || 0 | 1 | 2 | 3
 
-			rp.offset(a as isize).write(ap.offset(a as isize).read());
-			rp.offset(b as isize).write(ap.offset(b as isize).read());
-			rp.offset(c as isize).write(ap.offset(c as isize).read());
-			rp.offset(d as isize).write(ap.offset(d as isize).read());
-		} else {
-			std::ptr::copy_nonoverlapping(ap, rp, n);
-		}
+		rp.offset(a as isize).write(ap.offset(a as isize).read());
+		rp.offset(b as isize).write(ap.offset(b as isize).read());
+		rp.offset(c as isize).write(ap.offset(c as isize).read());
+		rp.offset(d as isize).write(ap.offset(d as isize).read());
+	} else {
+		std::ptr::copy_nonoverlapping(ap, rp, n);
 	}
 }
 
 pub unsafe fn trim_unchecked(p: *const Limb, i: usize, mut n: usize) -> usize {
-	while n > i && p.add(n - 1).read().value == 0 {
+	debug_assert!(i <= n);
+	while n != i && p.add(n - 1).read().value == 0 {
 		n -= 1;
 	}
 	n
 }
 
+/// This is like `trim_unchecked()`, but it assumes that the highest limb is probably non-zero and
+/// so it is unlikely that any actual trimming will be needed.
 #[inline(always)]
-pub unsafe fn cold_trim_unchecked(p: *const Limb, i: usize, mut n: usize) -> usize {
-	if i >= n {
-		return n;
-	}
-
-	if p.add(n - 1).read().value == 0 {
+pub unsafe fn cold_trim_unchecked(p: *const Limb, i: usize, n: usize) -> usize {
+	debug_assert!(i <= n);
+	if i == n || p.add(n - 1).read().value != 0 {
+		n
+	} else {
 		cold_path();
-		n -= 1;
-		while i < n && p.add(n - 1).read().value == 0 {
-			n -= 1;
-		}
+		trim_unchecked(p, i, n - 1)
 	}
-	n
 }
 
 #[inline]
@@ -136,9 +148,7 @@ pub unsafe fn add_carry_unchecked(
 		i += 1;
 	}
 
-	if i != n && rp as *const Limb != ap {
-		numcpy_unchecked(rp.add(i), ap.add(i), n - i);
-	}
+	numcpy_unchecked(rp, ap, i, n);
 	false
 }
 
@@ -195,43 +205,8 @@ pub unsafe fn sub_borrow_unchecked(
 		i += 1;
 	}
 
-	if i != n && rp as *const Limb != ap {
-		numcpy_unchecked(rp.add(i), ap.add(i), n - i);
-	}
+	numcpy_unchecked(rp, ap, i, n);
 	false
-}
-
-/// This is functionally equivalent to:
-/// ```rust
-///     let borrow = sub_n_unchecked(rp, ap, bp, i, n);
-///     let len = trim_unchecked(rp, 0, n);
-///     return len;
-/// ```
-/// but it leads to better assembly because the trim is only called when needed.
-pub unsafe fn sub_borrow_trim_unchecked(
-	rp: *mut Limb, ap: *const Limb, mut borrow: bool, i: usize, n: usize,
-) -> usize {
-	debug_assert!(rp as *const Limb == ap || has_no_overlap(rp, n, ap, n));
-
-	let mut i = i;
-	while borrow {
-		if i == n {
-			return n;
-		}
-
-		let a = ap.add(i).read();
-		borrow = a.value == 0;
-		rp.add(i).write(Limb { value: a.value.wrapping_sub(1) });
-
-		i += 1;
-	}
-
-	if i != n {
-		if rp as *const Limb != ap {
-			numcpy_unchecked(rp.add(i), ap.add(i), n - i);
-		}
-	}
-	trim_unchecked(rp, 0, n)
 }
 
 pub unsafe fn sub_1_unchecked(rp: *mut Limb, ap: *const Limb, i: usize, n: usize, b: Limb) -> bool {

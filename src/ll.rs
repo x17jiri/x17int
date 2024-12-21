@@ -24,8 +24,8 @@ use core::ptr::NonNull;
 use std::intrinsics::{assume, cold_path, likely, unlikely};
 use std::num::NonZeroUsize;
 
-use crate::blocks;
 pub use crate::blocks::Limb;
+use crate::blocks::{self, trim_unchecked};
 use crate::error::{assert, Error, ErrorKind};
 
 /// Returns the number of bits needed to store the number.
@@ -34,11 +34,7 @@ use crate::error::{assert, Error, ErrorKind};
 /// - the highest limb (if any) must be non-zero
 /// TODO - what could we do if the highest limb is zero? What would be the proper interface?
 pub fn bit_width(a: &[Limb]) -> usize {
-	if a.is_empty() {
-		0 //
-	} else {
-		unsafe { blocks::bit_width_unchecked(a.as_ptr(), a.len()) }
-	}
+	unsafe { blocks::bit_width_unchecked(a.as_ptr(), a.len()) }
 }
 
 #[inline]
@@ -46,6 +42,12 @@ pub fn numcpy_est(a: &[Limb]) -> usize {
 	a.len()
 }
 
+/// In order to be consistent with other functions, this also trims the leading zeros.
+///
+/// It always copies the entire input buffer and only then does the trimming.
+///
+/// If you don't need trimming, just ignore the return value. As long as the function is inlined,
+/// the compiler should figure out it's dead code and optimize it away.
 #[inline(never)]
 #[must_use]
 pub fn numcpy(r: &mut [Limb], a: &[Limb]) -> Result<usize, Error> {
@@ -56,13 +58,9 @@ pub fn numcpy(r: &mut [Limb], a: &[Limb]) -> Result<usize, Error> {
 	assert(r.len() >= a.len(), || Error::new_buffer_too_small("ll::numcpy()"))?;
 
 	unsafe {
-		blocks::numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), a.len());
-		if r.get_unchecked(a.len() - 1).value == 0 {
-			cold_path();
-			return Ok(blocks::trim_unchecked(r.as_mut_ptr(), 0, a.len() - 1));
-		}
+		blocks::numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 0, a.len());
+		Ok(blocks::cold_trim_unchecked(r.as_mut_ptr(), 0, a.len()))
 	}
-	Ok(a.len())
 }
 
 #[inline]
@@ -81,15 +79,16 @@ pub fn add(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> Result<usize, Error> {
 
 	let rp = r.as_mut_ptr();
 	let ap = a.as_ptr();
+	let an = a.len();
 	let bp = b.as_ptr();
-	let mut carry;
+	let bn = b.len();
 	unsafe {
-		carry = blocks::add_n_unchecked(rp, ap, bp, 0, b.len());
-		carry = blocks::add_carry_unchecked(rp, ap, carry, b.len(), a.len());
+		let carry = blocks::add_n_unchecked(rp, ap, bp, 0, bn);
+		let carry = blocks::add_carry_unchecked(rp, ap, carry, bn, an);
+		r.get_unchecked_mut(an).value = carry as Limb::Value;
+		let rn = an + (carry as usize);
+		Ok(blocks::cold_trim_unchecked(rp, 0, rn))
 	}
-	r[a.len()].value = carry as Limb::Value;
-	let r_len = a.len() + (carry as usize);
-	unsafe { Ok(blocks::cold_trim_unchecked(r.as_mut_ptr(), 0, r_len)) }
 }
 
 /// This function does two things:
@@ -166,11 +165,15 @@ pub fn sub(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> Result<(bool, usize), Erro
 
 	let rp = r.as_mut_ptr();
 	let ap = a.as_ptr();
+	let an = a.len();
 	let bp = b.as_ptr();
+	let bn = b.len();
 	unsafe {
-		let borrow = blocks::sub_n_unchecked(rp, ap, bp, 0, b.len());
-		let len = blocks::sub_borrow_trim_unchecked(rp, ap, borrow, b.len(), a.len());
-		Ok((swapped, len))
+		let borrow = blocks::sub_n_unchecked(rp, ap, bp, 0, bn);
+		let borrow = blocks::sub_borrow_unchecked(rp, ap, borrow, bn, an);
+		debug_assert!(!borrow);
+		let rn = trim_unchecked(rp, 0, an);
+		Ok((swapped, rn))
 	}
 }
 

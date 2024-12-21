@@ -26,7 +26,7 @@ pub mod error;
 pub mod ll;
 
 use buf::{Buffer, InlineBuffer};
-use error::{Error, ErrorKind, assert};
+use error::{assert, Error, ErrorKind};
 use ll::Limb;
 
 #[macro_export]
@@ -323,9 +323,9 @@ impl Int {
 		unsafe {
 			std::intrinsics::assume(buf.cap.get() >= A.len);
 		}
-		ll::numcpy(buf.as_slice(), A.as_slice())?;
+		let a_len = ll::numcpy(buf.as_slice(), A.as_slice())?;
 
-		buf.commit(A.len, A.neg)
+		buf.commit(a_len, A.neg)
 	}
 
 	#[inline(never)]
