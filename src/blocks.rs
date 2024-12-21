@@ -201,6 +201,39 @@ pub unsafe fn sub_borrow_unchecked(
 	false
 }
 
+/// This is functionally equivalent to:
+/// ```rust
+///     let borrow = sub_n_unchecked(rp, ap, bp, i, n);
+///     let len = trim_unchecked(rp, 0, n);
+///     return len;
+/// ```
+/// but it leads to better assembly because the trim is only called when needed.
+pub unsafe fn sub_borrow_trim_unchecked(
+	rp: *mut Limb, ap: *const Limb, mut borrow: bool, i: usize, n: usize,
+) -> usize {
+	debug_assert!(rp as *const Limb == ap || has_no_overlap(rp, n, ap, n));
+
+	let mut i = i;
+	while borrow {
+		if i == n {
+			return n;
+		}
+
+		let a = ap.add(i).read();
+		borrow = a.value == 0;
+		rp.add(i).write(Limb { value: a.value.wrapping_sub(1) });
+
+		i += 1;
+	}
+
+	if i != n {
+		if rp as *const Limb != ap {
+			numcpy_unchecked(rp.add(i), ap.add(i), n - i);
+		}
+	}
+	trim_unchecked(rp, 0, n)
+}
+
 pub unsafe fn sub_1_unchecked(rp: *mut Limb, ap: *const Limb, i: usize, n: usize, b: Limb) -> bool {
 	debug_assert!(i < n);
 	// TODO - when checking overlap, we should consider `i` as well

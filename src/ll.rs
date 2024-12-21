@@ -1,3 +1,25 @@
+// General notes about functions in this module:
+//
+// - These functions are safe
+//
+// - They provide "strong exception safety". If an error is returned, the output buffer
+//   is left unchanged.
+//
+// - Some of them may allocate scratch space on the heap. This is always documented.
+//   If there is allocation failure, an error is returned and the output buffer is left unchanged.
+//
+// - They don't allocate memory for the result. The caller provides a fixed-size buffer
+//   and the result either fits into it or an error is returned.
+//
+// - There is always a function for estimating the size of the result. For example, for `add()`,
+//   there is `add_est()`. These estimation functions are designed to be fast and may overestimate
+//
+// - They return length of the result. If `r` is the output buffer and `est_len` is the
+//   estimated buffer size, then:
+//     - r[0 ..< len] contains the result with any leading zeros trimmed
+//	   - r[len ..< est_len] may be overwritten
+//	   - r[est_len .. ] is left unchanged
+
 use core::ptr::NonNull;
 use std::intrinsics::{assume, cold_path, likely, unlikely};
 use std::num::NonZeroUsize;
@@ -20,6 +42,11 @@ pub fn bit_width(a: &[Limb]) -> usize {
 }
 
 #[inline]
+pub fn numcpy_est(a: &[Limb]) -> usize {
+	a.len()
+}
+
+#[inline(never)]
 #[must_use]
 pub fn numcpy(r: &mut [Limb], a: &[Limb]) -> Result<usize, Error> {
 	if a.is_empty() {
@@ -28,11 +55,22 @@ pub fn numcpy(r: &mut [Limb], a: &[Limb]) -> Result<usize, Error> {
 
 	assert(r.len() >= a.len(), || Error::new_buffer_too_small("ll::numcpy()"))?;
 
-	unsafe { blocks::numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), a.len()) };
+	unsafe {
+		blocks::numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), a.len());
+		if r.get_unchecked(a.len() - 1).value == 0 {
+			cold_path();
+			return Ok(blocks::trim_unchecked(r.as_mut_ptr(), 0, a.len() - 1));
+		}
+	}
 	Ok(a.len())
 }
 
-/// `r.len` must be at least `max(a.len, b.len) + 1`
+#[inline]
+pub fn add_est(a: &[Limb], b: &[Limb]) -> usize {
+	a.len().max(b.len()) + 1
+}
+
+/// `r.len` must be at least `max(a.len, b.len) + 1` even if the final result is shorter.
 #[inline(never)]
 #[must_use]
 pub fn add(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> Result<usize, Error> {
@@ -54,7 +92,19 @@ pub fn add(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> Result<usize, Error> {
 	unsafe { Ok(blocks::cold_trim_unchecked(r.as_mut_ptr(), 0, r_len)) }
 }
 
-pub fn __prep_sub<'a>(a: &'a [Limb], b: &'a [Limb]) -> (bool, &'a [Limb], &'a [Limb]) {
+/// This function does two things:
+/// 1. It trims common prefix from A and B
+///     - For example when subtracting `1173 - 1152`, the prefix `11` doesn't affect the result
+///       and can be removed. `1173 - 1152 == 73 - 52`.
+/// 2. It compares A and B and possibly swaps them to make sure that A >= B. The actual digits
+///    are compared, not just lengths.
+///     - With the numbers swapped, the subtraction `A - B` can never be negative.
+///
+/// The result is one of the following:
+/// - (false, [], []) if A == B
+/// - (false, A, B) if A > B
+/// - (true, B, A) if A < B
+fn __prep_sub<'a>(a: &'a [Limb], b: &'a [Limb]) -> (bool, &'a [Limb], &'a [Limb]) {
 	let mut len = a.len();
 
 	if a.len() != b.len() {
@@ -69,11 +119,15 @@ pub fn __prep_sub<'a>(a: &'a [Limb], b: &'a [Limb]) -> (bool, &'a [Limb], &'a [L
 			} else {
 				// The highest limb of A is zero. We need to trim it.
 				cold_path();
+
 				let a_len = blocks::trim_unchecked(a.as_ptr(), b.len(), a.len() - 1);
 				if a_len > b.len() {
 					return (swapped, a.get_unchecked(..a_len), b);
 				}
-				len = a_len; // a_len == b.len()
+
+				// We trimmed A enough so that it's the same length as B.
+				// Continue to the second part of this function and find which number is bigger.
+				len = a_len;
 			}
 		}
 	}
@@ -93,13 +147,31 @@ pub fn __prep_sub<'a>(a: &'a [Limb], b: &'a [Limb]) -> (bool, &'a [Limb], &'a [L
 	}
 }
 
-/// `r.len` must be at least `max(a.len, b.len)`
+#[inline]
+pub fn sub_est(a: &[Limb], b: &[Limb]) -> usize {
+	a.len().max(b.len())
+}
+
+/// `r.len` must be at least `max(a.len, b.len)` even if the final result is shorter.
+///
+/// Writes to `r` and returns `(neg, n)` where:
+///      r[0..<n] = abs(a - b)
+///      neg = a < b
 #[inline(never)]
 #[must_use]
-pub fn sub(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> Result<(usize, bool), Error> {
+pub fn sub(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> Result<(bool, usize), Error> {
 	let (swapped, a, b) = __prep_sub(a, b);
 
-	Ok((0, false)) // TODO
+	assert(r.len() >= a.len(), || Error::new_buffer_too_small("ll::sub()"))?;
+
+	let rp = r.as_mut_ptr();
+	let ap = a.as_ptr();
+	let bp = b.as_ptr();
+	unsafe {
+		let borrow = blocks::sub_n_unchecked(rp, ap, bp, 0, b.len());
+		let len = blocks::sub_borrow_trim_unchecked(rp, ap, borrow, b.len(), a.len());
+		Ok((swapped, len))
+	}
 }
 
 #[macro_use]
