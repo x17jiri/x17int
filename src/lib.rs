@@ -39,13 +39,13 @@ macro_rules! testvec {
 	};
 }
 
-enum ViewType {
+enum ViewKind {
 	Small,
 	Large,
 }
 
 struct IntView<'a> {
-	view_type: ViewType,
+	kind: ViewKind,
 	neg: bool,
 	len: usize,
 	limbs: NonNull<ll::Limb>,
@@ -61,7 +61,7 @@ impl<'a> Deref for IntView<'a> {
 }
 
 struct NonZeroIntView<'a> {
-	view_type: ViewType,
+	kind: ViewKind,
 	neg: bool,
 	len: NonZeroUsize,
 	limbs: NonNull<ll::Limb>,
@@ -119,15 +119,81 @@ impl Drop for OwnedBuffer {
 }
 
 struct BufView<'a> {
-	view_type: ViewType,
+	kind: ViewKind,
 	cap: NonZeroUsize,
 	limbs: NonNull<ll::Limb>,
 	phantom: std::marker::PhantomData<&'a ll::Limb>,
 }
 
-impl<'a> BufView<'a> {
-	fn as_mut_slice(&self) -> &'a mut [ll::Limb] {
+impl<'a> Deref for BufView<'a> {
+	type Target = [ll::Limb];
+
+	fn deref(&self) -> &Self::Target {
+		unsafe { std::slice::from_raw_parts(self.limbs.as_ptr(), self.cap.get()) }
+	}
+}
+
+impl<'a> DerefMut for BufView<'a> {
+	fn deref_mut(&mut self) -> &mut Self::Target {
 		unsafe { std::slice::from_raw_parts_mut(self.limbs.as_ptr(), self.cap.get()) }
+	}
+}
+
+#[derive(Clone, Copy)]
+struct TaggedPtr<T> {
+	__ptr: NonNull<u8>,
+	phantom: std::marker::PhantomData<T>,
+}
+
+impl<T> TaggedPtr<T> {
+	#[inline]
+	fn new_null(tag: bool) -> Self {
+		unsafe {
+			// I'm not aware of any contemporary architecture where the null pointer
+			// is not at address 0 and adresses 0-3 are valid.
+			//
+			// However, if there is such an architecture, this implementation would fail.
+			// In that case, we could return a pointer to a static variable and we'd need to
+			// update the test in `is_null()`.
+			// ```rust
+			//     static NULL_LIMB: ll::Limb = ll::Limb { value: 0 };
+			// ```
+			//
+			// For the moment, I stick with this implementation, because it leads to good assembly.
+			TaggedPtr::<T> {
+				__ptr: NonNull::new_unchecked(std::ptr::without_provenance_mut(2 | (tag as usize))),
+				phantom: std::marker::PhantomData,
+			}
+		}
+	}
+
+	#[inline]
+	fn new(ptr: NonNull<T>, tag: bool) -> Self {
+		Self {
+			__ptr: unsafe { ptr.cast::<u8>().offset(tag as isize).cast() },
+			phantom: std::marker::PhantomData,
+		}
+	}
+
+	#[inline]
+	fn is_null(&self) -> bool {
+		self.__ptr.addr().get() < 4
+	}
+
+	#[inline]
+	fn are_both_null(a: Self, b: Self) -> bool {
+		(a.__ptr.addr().get() | b.__ptr.addr().get()) < 4
+	}
+
+	#[inline]
+	fn tag(&self) -> bool {
+		!self.__ptr.is_aligned_to(2)
+	}
+
+	#[inline]
+	fn ptr(&self) -> NonNull<T> {
+		let tag = self.tag();
+		unsafe { self.__ptr.offset(-(tag as isize)).cast::<T>() }
 	}
 }
 
@@ -144,7 +210,7 @@ pub struct Int {
 	///
 	/// We use a sentinel instead of `null` so `vec` can be a NonNull pointer and
 	/// the compiler can optimize `Option<Int>`.
-	vec: NonNull<u8>,
+	vec: TaggedPtr<Limb>,
 
 	/// If the number is small, `magn` contains its value.
 	/// If the number is large, `magn` is the number of limbs.
@@ -157,7 +223,7 @@ impl Int {
 	}
 
 	pub fn new_inline(value: ll::Limb, neg: bool) -> Self {
-		let vec = Self::__null(neg);
+		let vec = TaggedPtr::new_null(neg);
 		let magn = value;
 		Self { vec, magn }
 	}
@@ -170,17 +236,13 @@ impl Int {
 		Self::new_with_buf(buf, 0, false)
 	}
 
-	unsafe fn new_with_buf_unchecked(buf: OwnedBuffer, len: usize, neg: bool) -> Self {
-		let buf = ManuallyDrop::new(buf);
-		Self {
-			vec: buf.ptr.cast::<u8>().offset(neg as isize),
-			magn: ll::Limb { value: len },
-		}
-	}
-
 	pub fn new_with_buf(buf: OwnedBuffer, len: usize, neg: bool) -> Result<Self, Error> {
 		if len <= buf.cap.get() {
-			Ok(unsafe { Self::new_with_buf_unchecked(buf, len, neg) })
+			let buf = ManuallyDrop::new(buf);
+			Ok(Self {
+				vec: TaggedPtr::new(buf.ptr, neg),
+				magn: ll::Limb { value: len },
+			})
 		} else {
 			cold_path();
 			Err(Error::new_buffer_too_small("new_with_buf"))
@@ -189,21 +251,15 @@ impl Int {
 
 	pub fn extract_buf(self) -> Option<OwnedBuffer> {
 		let this = ManuallyDrop::new(self);
-		if this.is_small() {
-			None
-		} else {
-			let ptr = this.vec.cast::<ll::Limb>();
-
-			let cap = unsafe { ptr.offset(-1).read() }.value;
-			debug_assert!(cap > 0);
-			let cap = unsafe { NonZeroUsize::new_unchecked(cap) };
-
-			Some(OwnedBuffer { ptr, cap })
+		let buf = this.__buf_view();
+		match buf.kind {
+			ViewKind::Small => None,
+			ViewKind::Large => Some(OwnedBuffer { ptr: buf.limbs, cap: buf.cap }),
 		}
 	}
 
 	pub fn is_negative(&self) -> bool {
-		!self.vec.is_aligned_to(2)
+		self.vec.tag()
 	}
 
 	pub fn is_zero(&self) -> bool {
@@ -219,74 +275,43 @@ impl Int {
 
 	/// A number is considered "small" if it stores all the data locally and doesn't use the heap.
 	pub fn is_small(&self) -> bool {
-		self.vec.addr().get() < 4
+		self.vec.is_null()
 	}
 
 	pub fn are_both_small(a: &Int, b: &Int) -> bool {
-		(a.vec.addr().get() | b.vec.addr().get()) < 4
+		TaggedPtr::are_both_null(a.vec, b.vec)
 	}
 
 	pub fn are_both_zero(a: &Int, b: &Int) -> bool {
 		(a.magn.value | b.magn.value) == 0
 	}
 
-	fn __null(neg: bool) -> NonNull<u8> {
-		unsafe {
-			// I'm not aware of any contemporary architecture where the null pointer
-			// is not at address 0 and adresses 0-3 are valid.
-			//
-			// However, if there is such an architecture, this implementation would fail.
-			// In that case, `__null()` could return a pointer to a static variable
-			// and we'd need to update the test in `is_small()`.
-			// ```rust
-			//     static NULL_LIMB: ll::Limb = ll::Limb { value: 0 };
-			// ```
-			//
-			// For the moment, I stick with this implementation, because it leads to good assembly.
-			NonNull::new_unchecked(std::ptr::without_provenance_mut(2 | (neg as usize)))
+	unsafe fn __small_buf_view<'a>(&'a self) -> BufView<'a> {
+		BufView {
+			kind: ViewKind::Small,
+			limbs: NonNull::from(&self.magn),
+			cap: NonZeroUsize::new_unchecked(1),
+			phantom: std::marker::PhantomData,
 		}
 	}
 
-	fn __large_buf_view<'a>(&'a self) -> Option<BufView<'a>> {
-		if self.is_small() {
-			return None;
-		}
-		unsafe {
-			let neg = self.is_negative();
-			let limbs = self.vec.offset(-(neg as isize)).cast::<ll::Limb>();
-			let cap = limbs.offset(-1).read().value;
-			debug_assert!(cap > 0);
-			let cap = NonZeroUsize::new_unchecked(cap);
-			let phantom = std::marker::PhantomData;
-			Some(BufView {
-				view_type: ViewType::Large,
-				cap,
-				limbs,
-				phantom,
-			})
-		}
-	}
-
-	fn __small_buf_view<'a>(&'a self) -> Option<BufView<'a>> {
-		if !self.is_small() {
-			return None;
-		}
-		let limbs = NonNull::from(&self.magn);
-		let cap = unsafe { NonZeroUsize::new_unchecked(1) };
-		let phantom = std::marker::PhantomData;
-		Some(BufView {
-			view_type: ViewType::Small,
-			cap,
+	unsafe fn __large_buf_view<'a>(&'a self) -> BufView<'a> {
+		let limbs = self.vec.ptr();
+		let cap = limbs.offset(-1).read().value;
+		debug_assert!(cap > 0);
+		BufView {
+			kind: ViewKind::Large,
 			limbs,
-			phantom,
-		})
+			cap: NonZeroUsize::new_unchecked(cap),
+			phantom: std::marker::PhantomData,
+		}
 	}
 
 	fn __buf_view<'a>(&'a self) -> BufView<'a> {
 		if self.is_small() {
-			self.__small_buf_view().unwrap()
+			unsafe { self.__small_buf_view() }
 		} else {
-			self.__large_buf_view().unwrap()
+			unsafe { self.__large_buf_view() }
 		}
 	}
 
@@ -334,47 +359,33 @@ impl Int {
 		Ok(buf)
 	}
 
-	fn __small_view<'a>(&'a self) -> IntView<'a> {
-		let neg = self.is_negative();
-		let limbs = NonNull::from(&self.magn);
-
+	unsafe fn __small_view<'a>(&'a self) -> IntView<'a> {
 		// Many operations work with the assumption that the highest limb is non-zero.
-		// Therefore when the value stored in magn is zero, we should return 0 limbs.
-		let len = (self.magn.value != 0) as usize;
-
-		let phantom = std::marker::PhantomData;
+		// Therefore when the value stored in magn is zero, we should return len == 0.
 		IntView {
-			view_type: ViewType::Small,
-			neg,
-			len,
-			limbs,
-			phantom,
+			kind: ViewKind::Small,
+			neg: self.is_negative(),
+			limbs: NonNull::from(&self.magn),
+			len: (self.magn.value != 0) as usize,
+			phantom: std::marker::PhantomData,
 		}
 	}
 
-	fn __large_view<'a>(&'a self) -> IntView<'a> {
-		let neg = self.is_negative();
-		let len = self.magn.value;
-
-		// TODO: The `offset()` below generates `sub` instruction.
-		// Could we improve it to generate `and`?
-		let limbs = unsafe { self.vec.offset(-(neg as isize)).cast::<ll::Limb>() };
-
-		let phantom = std::marker::PhantomData;
+	unsafe fn __large_view<'a>(&'a self) -> IntView<'a> {
 		IntView {
-			view_type: ViewType::Large,
-			neg,
-			len,
-			limbs,
-			phantom,
+			kind: ViewKind::Large,
+			neg: self.is_negative(),
+			limbs: self.vec.ptr(),
+			len: self.magn.value,
+			phantom: std::marker::PhantomData,
 		}
 	}
 
 	fn view<'a>(&'a self) -> IntView<'a> {
 		if self.is_small() {
-			self.__small_view()
+			unsafe { self.__small_view() }
 		} else {
-			self.__large_view()
+			unsafe { self.__large_view() }
 		}
 	}
 
@@ -384,7 +395,7 @@ impl Int {
 		}
 		let view = self.view();
 		Some(NonZeroIntView {
-			view_type: view.view_type,
+			kind: view.kind,
 			neg: view.neg,
 			// SAFETY: We know that the number is not zero.
 			len: unsafe { NonZeroUsize::new_unchecked(view.len) },
@@ -395,9 +406,9 @@ impl Int {
 
 	pub fn bit_capacity(&self) -> usize {
 		let view = self.__buf_view();
-		let cap = match view.view_type {
-			ViewType::Small => Self::ONE_LIMB,
-			ViewType::Large => view.cap.get(),
+		let cap = match view.kind {
+			ViewKind::Small => Self::ONE_LIMB,
+			ViewKind::Large => view.cap.get(),
 		};
 		cap * Limb::BITS
 	}
@@ -408,9 +419,9 @@ impl Int {
 
 	pub fn clone(&self) -> Result<Self, Error> {
 		let view = self.view();
-		match view.view_type {
-			ViewType::Small => Ok(Self { vec: self.vec, magn: self.magn }),
-			ViewType::Large => {
+		match view.kind {
+			ViewKind::Small => Ok(Self { vec: self.vec, magn: self.magn }),
+			ViewKind::Large => {
 				let len = ll::numcpy_est(&view);
 				let mut r = Self::alloc_buf(len)?;
 				let len = ll::numcpy(&mut r, &view)?;
@@ -495,33 +506,6 @@ impl Int {
 			}
 		}
 	}
-
-	/*	#[inline(never)]
-	#[must_use]
-	pub fn try_add_or_sub_(&mut self, a: &Int, sub: bool, b: &Int) -> Result<(), Error> {
-		let A = a.view();
-		let B = b.view();
-		let sub = A.neg ^ (sub ^ B.neg);
-		let buf_size = if sub {
-			ll::sub_est(A.as_slice(), B.as_slice())
-		} else {
-			ll::add_est(A.as_slice(), B.as_slice())
-		};
-		let mut inline_buf = buf::InlineBuffer::default();
-		let mut buf = buf::Buffer::new(self, buf_size, &mut inline_buf)?;
-
-		let mut r_neg = A.neg;
-		let r_len;
-		if sub {
-			let (neg, len) = ll::sub(buf.as_slice(), A.as_slice(), B.as_slice())?;
-			r_neg ^= neg;
-			r_len = len;
-		} else {
-			r_len = ll::add(buf.as_slice(), A.as_slice(), B.as_slice())?;
-		};
-
-		buf.commit(r_len, r_neg)
-	}*/
 }
 
 impl Drop for Int {
@@ -537,11 +521,6 @@ impl Default for Int {
 		Self::new_zero()
 	}
 }
-
-/*#[inline(never)]
-pub fn test_commit(b: &mut Buffer, len: usize, neg: bool) -> Result<(), Error> {
-	b.commit(len, neg)
-} */
 
 #[inline(never)]
 pub fn test_new_zero() -> Int {
