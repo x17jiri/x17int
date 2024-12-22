@@ -44,8 +44,7 @@ pub fn numcpy_est(a: &[Limb]) -> usize {
 	a.len()
 }
 
-#[inline(never)]
-#[must_use]
+#[inline]
 pub fn numcpy(r: &mut [Limb], a: &[Limb]) -> Result<usize, Error> {
 	assert(r.len() >= a.len(), || Error::new_buffer_too_small("ll::numcpy()"))?;
 	unsafe {
@@ -56,17 +55,14 @@ pub fn numcpy(r: &mut [Limb], a: &[Limb]) -> Result<usize, Error> {
 
 #[inline]
 pub fn add_est(a: &[Limb], b: &[Limb]) -> usize {
-	a.len().max(b.len()) + 1
+	unsafe { a.len().max(b.len()).unchecked_add(1) }
 }
 
 /// `r.len` must be at least `max(a.len, b.len) + 1` even if the final result is shorter.
 #[inline(never)]
-#[must_use]
-pub fn add(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> Result<usize, Error> {
+unsafe fn add_unchecked(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> usize {
 	// Ensure that `a` is not shorter than `b`
 	let (a, b) = if a.len() >= b.len() { (a, b) } else { (b, a) };
-
-	assert(r.len() > a.len(), || Error::new_buffer_too_small("ll::add()"))?;
 
 	let rp = r.as_mut_ptr();
 	let ap = a.as_ptr();
@@ -77,8 +73,48 @@ pub fn add(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> Result<usize, Error> {
 		let carry = blocks::add_n_unchecked(rp, ap, bp, 0, bn);
 		let carry = blocks::add_carry_unchecked(rp, ap, carry, bn, an);
 		r.get_unchecked_mut(an).value = carry as Limb::Value;
-		Ok(an + (carry as usize))
+		an + (carry as usize)
 	}
+}
+
+#[inline]
+pub fn add(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> Result<usize, Error> {
+	assert(r.len() > a.len(), || Error::new_buffer_too_small("ll::add()"))?;
+	unsafe {
+		let len = add_unchecked(r, a, b);
+		assume(len <= r.len());
+		Ok(len)
+	}
+}
+
+#[inline(always)]
+pub fn add_small<const N: usize>(a: &[Limb; N], b: &[Limb; N]) -> ([Limb; N], bool) {
+	let mut r: [Limb; N] = [Limb { value: 0 }; N];
+	let mut carry = false;
+	for i in 0..N {
+		(r[i], carry) = blocks::add3(a[i], b[i], carry);
+	}
+	(r, carry)
+}
+
+#[inline(always)]
+pub fn sub_small<const N: usize>(a: &[Limb; N], b: &[Limb; N]) -> ([Limb; N], bool) {
+	let mut swapped = false;
+	for i in (0..N).rev() {
+		swapped = a[i] < b[i];
+		if a[i] != b[i] {
+			break;
+		}
+	}
+	let (a, b) = if swapped { (b, a) } else { (a, b) };
+
+	let mut r: [Limb; N] = [Limb { value: 0 }; N];
+	let mut borrow = false;
+	for i in 0..N {
+		(r[i], borrow) = blocks::sub3(a[i], b[i], borrow);
+	}
+	debug_assert!(!borrow);
+	(r, swapped)
 }
 
 /// This function does two things:
@@ -147,12 +183,9 @@ pub fn sub_est(a: &[Limb], b: &[Limb]) -> usize {
 ///      r[0..<n] = abs(a - b)
 ///      neg = a < b
 #[inline(never)]
-#[must_use]
-pub fn sub(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> Result<(bool, usize), Error> {
+unsafe fn sub_unchecked(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> (bool, usize) {
 	// Ensure that `a` is not smaller than `b`
 	let (swapped, a, b) = __prep_sub(a, b);
-
-	assert(r.len() >= a.len(), || Error::new_buffer_too_small("ll::sub()"))?;
 
 	let rp = r.as_mut_ptr();
 	let ap = a.as_ptr();
@@ -164,7 +197,17 @@ pub fn sub(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> Result<(bool, usize), Erro
 		let borrow = blocks::sub_borrow_unchecked(rp, ap, borrow, bn, an);
 		debug_assert!(!borrow);
 		let rn = trim_unchecked(rp, 0, an);
-		Ok((swapped, rn))
+		(swapped, rn)
+	}
+}
+
+#[inline]
+pub fn sub(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> Result<(bool, usize), Error> {
+	assert(r.len() >= sub_est(a, b), || Error::new_buffer_too_small("ll::sub()"))?;
+	unsafe {
+		let (neg, len) = sub_unchecked(r, a, b);
+		assume(len <= r.len());
+		Ok((neg, len))
 	}
 }
 

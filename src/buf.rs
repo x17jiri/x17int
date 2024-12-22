@@ -1,3 +1,4 @@
+/*
 use crate::error::{Error, ErrorKind};
 use crate::{ll, Int};
 use std::intrinsics::{assume, likely, unlikely};
@@ -55,7 +56,6 @@ impl<'a> Buffer<'a> {
 			}
 		}
 
-		let size = unsafe { NonZeroUsize::new_unchecked(size) };
 		let new_buf = Int::__alloc(size)?;
 		Ok(Self {
 			neg: false,
@@ -88,7 +88,7 @@ impl<'a> Buffer<'a> {
 						self.R.__set_inline(value, neg);
 					}
 				} else {
-					let new_buf = Int::__alloc(NonZeroUsize::new(INLINE_BUF_SIZE).unwrap())?;
+					let new_buf = Int::__alloc(INLINE_BUF_SIZE)?;
 					unsafe {
 						std::ptr::copy_nonoverlapping(
 							self.limbs.as_ptr(),
@@ -135,3 +135,4 @@ impl Drop for Buffer<'_> {
 		}
 	}
 }
+*/

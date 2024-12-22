@@ -17,15 +17,18 @@ use core::panic;
 use std::alloc::{Allocator, Global, Layout};
 use std::char::MAX;
 use std::intrinsics::{assume, cold_path, likely, unlikely};
+use std::mem::ManuallyDrop;
 use std::num::NonZeroUsize;
+use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
+use std::result;
 
 pub mod blocks;
 pub mod buf;
 pub mod error;
 pub mod ll;
 
-use buf::{Buffer, InlineBuffer};
+//use buf::{Buffer, InlineBuffer};
 use error::{assert, Error, ErrorKind};
 use ll::{numcpy_est, Limb};
 
@@ -36,36 +39,96 @@ macro_rules! testvec {
 	};
 }
 
+enum ViewType {
+	Small,
+	Large,
+}
+
 struct IntView<'a> {
+	view_type: ViewType,
 	neg: bool,
 	len: usize,
 	limbs: NonNull<ll::Limb>,
 	phantom: std::marker::PhantomData<&'a ll::Limb>,
 }
 
-impl<'a> IntView<'a> {
-	fn as_slice(&self) -> &'a [ll::Limb] {
+impl<'a> Deref for IntView<'a> {
+	type Target = [ll::Limb];
+
+	fn deref(&self) -> &Self::Target {
 		unsafe { std::slice::from_raw_parts(self.limbs.as_ptr(), self.len) }
 	}
 }
 
 struct NonZeroIntView<'a> {
+	view_type: ViewType,
 	neg: bool,
 	len: NonZeroUsize,
 	limbs: NonNull<ll::Limb>,
 	phantom: std::marker::PhantomData<&'a ll::Limb>,
 }
 
-impl<'a> NonZeroIntView<'a> {
-	fn as_slice(&self) -> &'a [ll::Limb] {
+impl<'a> Deref for NonZeroIntView<'a> {
+	type Target = [ll::Limb];
+
+	fn deref(&self) -> &Self::Target {
 		unsafe { std::slice::from_raw_parts(self.limbs.as_ptr(), self.len.get()) }
 	}
 }
 
+pub struct OwnedBuffer {
+	ptr: NonNull<ll::Limb>,
+	cap: NonZeroUsize,
+}
+
+impl OwnedBuffer {
+	fn as_mut_slice(&mut self) -> &mut [ll::Limb] {
+		unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.cap.get()) }
+	}
+}
+
+impl Deref for OwnedBuffer {
+	type Target = [ll::Limb];
+
+	fn deref(&self) -> &Self::Target {
+		unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.cap.get()) }
+	}
+}
+
+impl DerefMut for OwnedBuffer {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		self.as_mut_slice()
+	}
+}
+
+impl Drop for OwnedBuffer {
+	fn drop(&mut self) {
+		unsafe {
+			let ptr = self.ptr.offset(-1);
+			let cap = self.cap.get();
+			debug_assert!(cap == ptr.read().value);
+
+			let size = (cap + 1) * std::mem::size_of::<ll::Limb>();
+			let align = std::mem::align_of::<ll::Limb>();
+			debug_assert!(size > 0);
+
+			assume(size > 0);
+			Global.deallocate(ptr.cast::<u8>(), Layout::from_size_align_unchecked(size, align));
+		}
+	}
+}
+
 struct BufView<'a> {
+	view_type: ViewType,
 	cap: NonZeroUsize,
 	limbs: NonNull<ll::Limb>,
 	phantom: std::marker::PhantomData<&'a ll::Limb>,
+}
+
+impl<'a> BufView<'a> {
+	fn as_mut_slice(&self) -> &'a mut [ll::Limb] {
+		unsafe { std::slice::from_raw_parts_mut(self.limbs.as_ptr(), self.cap.get()) }
+	}
 }
 
 pub struct Int {
@@ -90,9 +153,52 @@ pub struct Int {
 
 impl Int {
 	pub fn new_zero() -> Self {
+		Self::new_inline(ll::Limb { value: 0 }, false)
+	}
+
+	pub fn new_inline(value: ll::Limb, neg: bool) -> Self {
+		let vec = Self::__null(neg);
+		let magn = value;
+		Self { vec, magn }
+	}
+
+	pub fn new_with_cap(cap: usize) -> Result<Self, Error> {
+		let buf = Self::alloc_buf(cap).map_err(|e| {
+			cold_path();
+			e
+		})?;
+		Self::new_with_buf(buf, 0, false)
+	}
+
+	unsafe fn new_with_buf_unchecked(buf: OwnedBuffer, len: usize, neg: bool) -> Self {
+		let buf = ManuallyDrop::new(buf);
 		Self {
-			vec: Self::__null(false),
-			magn: ll::Limb { value: 0 },
+			vec: buf.ptr.cast::<u8>().offset(neg as isize),
+			magn: ll::Limb { value: len },
+		}
+	}
+
+	pub fn new_with_buf(buf: OwnedBuffer, len: usize, neg: bool) -> Result<Self, Error> {
+		if len <= buf.cap.get() {
+			Ok(unsafe { Self::new_with_buf_unchecked(buf, len, neg) })
+		} else {
+			cold_path();
+			Err(Error::new_buffer_too_small("new_with_buf"))
+		}
+	}
+
+	pub fn extract_buf(self) -> Option<OwnedBuffer> {
+		let this = ManuallyDrop::new(self);
+		if this.is_small() {
+			None
+		} else {
+			let ptr = this.vec.cast::<ll::Limb>();
+
+			let cap = unsafe { ptr.offset(-1).read() }.value;
+			debug_assert!(cap > 0);
+			let cap = unsafe { NonZeroUsize::new_unchecked(cap) };
+
+			Some(OwnedBuffer { ptr, cap })
 		}
 	}
 
@@ -114,6 +220,14 @@ impl Int {
 	/// A number is considered "small" if it stores all the data locally and doesn't use the heap.
 	pub fn is_small(&self) -> bool {
 		self.vec.addr().get() < 4
+	}
+
+	pub fn are_both_small(a: &Int, b: &Int) -> bool {
+		(a.vec.addr().get() | b.vec.addr().get()) < 4
+	}
+
+	pub fn are_both_zero(a: &Int, b: &Int) -> bool {
+		(a.magn.value | b.magn.value) == 0
 	}
 
 	fn __null(neg: bool) -> NonNull<u8> {
@@ -144,7 +258,12 @@ impl Int {
 			debug_assert!(cap > 0);
 			let cap = NonZeroUsize::new_unchecked(cap);
 			let phantom = std::marker::PhantomData;
-			Some(BufView { cap, limbs, phantom })
+			Some(BufView {
+				view_type: ViewType::Large,
+				cap,
+				limbs,
+				phantom,
+			})
 		}
 	}
 
@@ -155,43 +274,20 @@ impl Int {
 		let limbs = NonNull::from(&self.magn);
 		let cap = unsafe { NonZeroUsize::new_unchecked(1) };
 		let phantom = std::marker::PhantomData;
-		Some(BufView { cap, limbs, phantom })
-	}
-
-	fn __buf_view<'a>(&'a self) -> BufView<'a> {
-		self.__small_buf_view().unwrap_or_else(|| {
-			self.__large_buf_view().unwrap_or_else(|| {
-				// SAFETY: The number has to be either small or large.
-				unsafe { std::hint::unreachable_unchecked() }
-			})
+		Some(BufView {
+			view_type: ViewType::Small,
+			cap,
+			limbs,
+			phantom,
 		})
 	}
 
-	fn __set_inline(&mut self, value: ll::Limb, neg: bool) {
-		self.vec = Self::__null(neg);
-		self.magn = value;
-	}
-
-	/// The allocated buffer has to be at least as big as the inline buffer, i.e., one limb.
-	unsafe fn __set_allocated(&mut self, buffer: NonNull<[ll::Limb]>, len: usize, neg: bool) {
-		debug_assert!(buffer.len() >= Self::ONE_LIMB);
-		debug_assert!(len <= buffer.len());
-
-		// SAFETY: We still stay within the allocated buffer.
-		// The `offset` just makes the pointer unaligned to represent the sign.
-		self.vec = buffer.cast::<u8>().offset(neg as isize);
-		self.magn = ll::Limb { value: len };
-	}
-
-	unsafe fn __set_len_neg(&mut self, len: usize, neg: bool) {
-		debug_assert!(!self.is_small());
-		if let Some(buf_view) = self.__large_buf_view() {
-			debug_assert!(len <= buf_view.cap.get());
+	fn __buf_view<'a>(&'a self) -> BufView<'a> {
+		if self.is_small() {
+			self.__small_buf_view().unwrap()
+		} else {
+			self.__large_buf_view().unwrap()
 		}
-
-		let prev_neg = self.is_negative();
-		self.vec = self.vec.offset(-(prev_neg as isize) + (neg as isize));
-		self.magn = ll::Limb { value: len };
 	}
 
 	const MAX_LIMBS: usize = usize::MAX / Limb::BITS;
@@ -201,10 +297,10 @@ impl Int {
 	/// to easily find places where the capacity is used.
 	const ONE_LIMB: usize = 1;
 
-	#[must_use]
 	#[inline(never)]
-	fn __alloc(n: NonZeroUsize) -> Result<NonNull<[ll::Limb]>, Error> {
-		let n = n.get();
+	fn __alloc_buf(n: usize) -> Result<OwnedBuffer, Error> {
+		let n = n.max(3); // TODO - create named constant for the '3'
+
 		assert(n <= Self::MAX_LIMBS, || {
 			Error::new_alloc_failed("Number of limbs exceeds the maximum.")
 		})?;
@@ -220,48 +316,25 @@ impl Int {
 		})?;
 
 		let ptr = new_buf.as_non_null_ptr();
-		let ptr = ptr.cast::<ll::Limb>().as_ptr();
+		let ptr = ptr.cast::<ll::Limb>();
+
 		let cap = (new_buf.len() / std::mem::size_of::<ll::Limb>()) - 1;
 		let cap = if likely(cap <= Self::MAX_LIMBS) { cap } else { Self::MAX_LIMBS };
-		unsafe {
-			ptr.write(ll::Limb { value: cap });
-			let ptr = ptr.offset(1);
-			Ok(NonNull::new_unchecked(std::slice::from_raw_parts_mut(ptr, cap)))
-		}
+		let cap = unsafe { NonZeroUsize::new_unchecked(cap) };
+
+		unsafe { ptr.write(ll::Limb { value: cap.get() }) };
+		let ptr = unsafe { ptr.offset(1) };
+
+		Ok(OwnedBuffer { ptr, cap })
 	}
 
-	unsafe fn __free(buf: NonNull<ll::Limb>) {
-		let ptr = buf.offset(-1);
-		let cap = ptr.read().value;
-		let size = (cap + 1) * std::mem::size_of::<ll::Limb>();
-		let align = std::mem::align_of::<ll::Limb>();
-		debug_assert!(size > 0);
-		assume(size > 0);
-		Global.deallocate(ptr.cast::<u8>(), Layout::from_size_align_unchecked(size, align));
+	pub fn alloc_buf(n: usize) -> Result<OwnedBuffer, Error> {
+		let buf = Self::__alloc_buf(n)?;
+		unsafe { assume(buf.cap.get() >= n) };
+		Ok(buf)
 	}
 
-	fn __large_view<'a>(&'a self) -> Option<IntView<'a>> {
-		if self.is_small() {
-			return None;
-		}
-		// SAFETY: We know that the number is not small.
-		unsafe {
-			let neg = self.is_negative();
-			let len = self.magn.value;
-
-			// TODO: The `offset()` below generates `sub` instruction.
-			// Could we improve it to generate `and`?
-			let limbs = self.vec.offset(-(neg as isize)).cast::<ll::Limb>();
-
-			let phantom = std::marker::PhantomData;
-			Some(IntView { neg, len, limbs, phantom })
-		}
-	}
-
-	fn __small_view<'a>(&'a self) -> Option<IntView<'a>> {
-		if !self.is_small() {
-			return None;
-		}
+	fn __small_view<'a>(&'a self) -> IntView<'a> {
 		let neg = self.is_negative();
 		let limbs = NonNull::from(&self.magn);
 
@@ -270,16 +343,39 @@ impl Int {
 		let len = (self.magn.value != 0) as usize;
 
 		let phantom = std::marker::PhantomData;
-		Some(IntView { neg, len, limbs, phantom })
+		IntView {
+			view_type: ViewType::Small,
+			neg,
+			len,
+			limbs,
+			phantom,
+		}
+	}
+
+	fn __large_view<'a>(&'a self) -> IntView<'a> {
+		let neg = self.is_negative();
+		let len = self.magn.value;
+
+		// TODO: The `offset()` below generates `sub` instruction.
+		// Could we improve it to generate `and`?
+		let limbs = unsafe { self.vec.offset(-(neg as isize)).cast::<ll::Limb>() };
+
+		let phantom = std::marker::PhantomData;
+		IntView {
+			view_type: ViewType::Large,
+			neg,
+			len,
+			limbs,
+			phantom,
+		}
 	}
 
 	fn view<'a>(&'a self) -> IntView<'a> {
-		self.__small_view().unwrap_or_else(|| {
-			self.__large_view().unwrap_or_else(|| {
-				// SAFETY: The number has to be either small or large.
-				unsafe { std::hint::unreachable_unchecked() }
-			})
-		})
+		if self.is_small() {
+			self.__small_view()
+		} else {
+			self.__large_view()
+		}
 	}
 
 	fn nonzero_view<'a>(&'a self) -> Option<NonZeroIntView<'a>> {
@@ -288,6 +384,7 @@ impl Int {
 		}
 		let view = self.view();
 		Some(NonZeroIntView {
+			view_type: view.view_type,
 			neg: view.neg,
 			// SAFETY: We know that the number is not zero.
 			len: unsafe { NonZeroUsize::new_unchecked(view.len) },
@@ -297,24 +394,32 @@ impl Int {
 	}
 
 	pub fn bit_capacity(&self) -> usize {
-		let limbs = //.
-			if let Some(view) = self.__large_view() {
-				view.len
-			} else {
-				Self::ONE_LIMB
-			};
-		limbs * Limb::BITS
+		let view = self.__buf_view();
+		let cap = match view.view_type {
+			ViewType::Small => Self::ONE_LIMB,
+			ViewType::Large => view.cap.get(),
+		};
+		cap * Limb::BITS
 	}
 
 	pub fn bit_width(&self) -> usize {
-		if let Some(view) = self.nonzero_view() {
-			ll::bit_width(view.as_slice()) //
-		} else {
-			0
+		self.nonzero_view().map_or(0, |view| ll::bit_width(&view))
+	}
+
+	pub fn clone(&self) -> Result<Self, Error> {
+		let view = self.view();
+		match view.view_type {
+			ViewType::Small => Ok(Self { vec: self.vec, magn: self.magn }),
+			ViewType::Large => {
+				let len = ll::numcpy_est(&view);
+				let mut r = Self::alloc_buf(len)?;
+				let len = ll::numcpy(&mut r, &view)?;
+				Self::new_with_buf(r, len, view.neg)
+			},
 		}
 	}
 
-	#[inline(never)]
+	/*	#[inline(never)]
 	#[must_use]
 	pub fn try_assign(&mut self, a: &Int) -> Result<(), Error> {
 		let A = a.view();
@@ -326,16 +431,74 @@ impl Int {
 		let r_neg = A.neg;
 
 		buf.commit(r_len, r_neg)
-	}
+	}*/
 
-	#[inline(never)]
+	/*	#[inline(never)]
 	pub fn assign(&mut self, a: &Int) {
 		self.try_assign(a).unwrap()
+	}*/
+
+	#[inline(always)]
+	pub fn try_add_small(a: &Int, b: &Int) -> Option<Int> {
+		if !Self::are_both_small(a, b) {
+			return None;
+		}
+		let (val, carry) = ll::add_small(&[a.magn], &[b.magn]);
+		if carry {
+			return None;
+		}
+		// `vec: a.vec` copies the sign of a
+		Some(Int { vec: a.vec, magn: val[0] })
+	}
+
+	#[inline(always)]
+	pub fn try_sub_small(a: &Int, b: &Int) -> Option<Int> {
+		if !Self::are_both_small(a, b) {
+			return None;
+		}
+		let (val, neg) = ll::sub_small(&[a.magn], &[b.magn]);
+		Some(Self::new_inline(val[0], a.is_negative() ^ neg))
 	}
 
 	#[inline(never)]
+	fn __add(a: &Int, b: &Int) -> Result<Int, Error> {
+		let (a, b) = (a.view(), b.view());
+		let buf_size = ll::add_est(&a, &b);
+		let mut r = Self::alloc_buf(buf_size)?;
+		let len = ll::add(&mut r, &a, &b)?;
+		Self::new_with_buf(r, len, a.neg)
+	}
+
+	#[inline(never)]
+	fn __sub(a: &Int, b: &Int) -> Result<Int, Error> {
+		let (a, b) = (a.view(), b.view());
+		let buf_size = ll::sub_est(&a, &b);
+		let mut r = Self::alloc_buf(buf_size)?;
+		let (neg, len) = ll::sub(&mut r, &a, &b)?;
+		Self::new_with_buf(r, len, a.neg ^ neg)
+	}
+
+	#[inline(never)]
+	pub fn try_add_or_sub(a: &Int, sub: bool, b: &Int) -> Result<Int, Error> {
+		let sub = a.is_negative() ^ (sub ^ b.is_negative());
+		if sub {
+			if let Some(small) = Self::try_sub_small(a, b) {
+				Ok(small)
+			} else {
+				Self::__sub(a, b)
+			}
+		} else {
+			if let Some(small) = Self::try_add_small(a, b) {
+				Ok(small)
+			} else {
+				Self::__add(a, b)
+			}
+		}
+	}
+
+	/*	#[inline(never)]
 	#[must_use]
-	pub fn try_add_or_sub(&mut self, a: &Int, sub: bool, b: &Int) -> Result<(), Error> {
+	pub fn try_add_or_sub_(&mut self, a: &Int, sub: bool, b: &Int) -> Result<(), Error> {
 		let A = a.view();
 		let B = b.view();
 		let sub = A.neg ^ (sub ^ B.neg);
@@ -358,14 +521,14 @@ impl Int {
 		};
 
 		buf.commit(r_len, r_neg)
-	}
+	}*/
 }
 
 impl Drop for Int {
 	fn drop(&mut self) {
-		if let Some(view) = self.__large_view() {
-			unsafe { Self::__free(view.limbs) };
-		}
+		let t = Self { vec: self.vec, magn: self.magn };
+		let _buf = t.extract_buf();
+		// _buf will be dropped here
 	}
 }
 
@@ -375,20 +538,10 @@ impl Default for Int {
 	}
 }
 
-#[inline(never)]
-pub fn test_set_inline(i: &mut Int, value: usize, neg: bool) {
-	i.__set_inline(ll::Limb { value }, neg);
-}
-
-#[inline(never)]
+/*#[inline(never)]
 pub fn test_commit(b: &mut Buffer, len: usize, neg: bool) -> Result<(), Error> {
 	b.commit(len, neg)
-}
-
-#[inline(never)]
-pub fn test_alloc(n: NonZeroUsize) -> Result<NonNull<[ll::Limb]>, Error> {
-	Int::__alloc(n)
-}
+} */
 
 #[inline(never)]
 pub fn test_new_zero() -> Int {

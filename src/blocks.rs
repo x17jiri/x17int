@@ -1,6 +1,6 @@
 use std::intrinsics::{assume, cold_path};
 
-#[derive(Clone, Copy, Default, PartialEq, Debug, PartialOrd)]
+#[derive(Clone, Copy, Default, PartialEq, Debug, Eq, Ord, PartialOrd)]
 pub struct Limb {
 	pub value: usize,
 }
@@ -116,7 +116,7 @@ pub unsafe fn cold_trim_unchecked(p: *const Limb, i: usize, n: usize) -> usize {
 }
 
 #[inline]
-pub unsafe fn add3(a: Limb, b: Limb, carry: bool) -> (Limb, bool) {
+pub fn add3(a: Limb, b: Limb, carry: bool) -> (Limb, bool) {
 	let (sum, overflow1) = a.value.overflowing_add(b.value);
 	let (sum, overflow2) = sum.overflowing_add(carry as usize);
 	(Limb { value: sum }, overflow1 | overflow2)
@@ -197,7 +197,7 @@ pub unsafe fn add_1_unchecked(rp: *mut Limb, ap: *const Limb, b: Limb, i: usize,
 }
 
 #[inline]
-pub unsafe fn sub3(a: Limb, b: Limb, borrow: bool) -> (Limb, bool) {
+pub fn sub3(a: Limb, b: Limb, borrow: bool) -> (Limb, bool) {
 	let (diff, borrow1) = a.value.overflowing_sub(b.value);
 	let (diff, borrow2) = diff.overflowing_sub(borrow as usize);
 	(Limb { value: diff }, borrow1 | borrow2)
