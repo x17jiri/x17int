@@ -2,7 +2,7 @@
 name = "x17int"
 version = "0.1.0"
 authors = ["Jiri <jiri.bobek@gmail.com>"]
-edition = "2021"
+edition = "2024"
 
 [profile.release]
 opt-level = 3

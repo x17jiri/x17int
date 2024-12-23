@@ -26,6 +26,7 @@ use std::result;
 pub mod blocks;
 pub mod buf;
 pub mod error;
+pub mod fixed_size;
 pub mod ll;
 pub mod tagged_ptr;
 
@@ -360,7 +361,7 @@ impl Int {
 			ViewKind::Large => {
 				let len = ll::numcpy_est(&view);
 				let mut r = Self::alloc_buf(len)?;
-				let len = ll::numcpy(&mut r, &view)?;
+				let len = ll::numcpy(&mut r, &view);
 				Self::new_with_buf(r, len, view.neg)
 			},
 		}
@@ -390,7 +391,7 @@ impl Int {
 		if !Self::are_both_small(a, b) {
 			return None;
 		}
-		let (val, carry) = ll::add_small(&[a.magn], &[b.magn]);
+		let (val, carry) = fixed_size::add(&[a.magn], &[b.magn]);
 		if carry {
 			return None;
 		}
@@ -403,7 +404,7 @@ impl Int {
 		if !Self::are_both_small(a, b) {
 			return None;
 		}
-		let (val, neg) = ll::sub_small(&[a.magn], &[b.magn]);
+		let (val, neg) = fixed_size::sub(&[a.magn], &[b.magn]);
 		Some(Self::new_inline(val[0], a.is_negative() ^ neg))
 	}
 
@@ -412,7 +413,7 @@ impl Int {
 		let (a, b) = (a.view(), b.view());
 		let buf_size = ll::add_est(&a, &b);
 		let mut r = Self::alloc_buf(buf_size)?;
-		let len = ll::add(&mut r, &a, &b)?;
+		let len = ll::add(&mut r, &a, &b);
 		Self::new_with_buf(r, len, a.neg)
 	}
 
@@ -421,7 +422,7 @@ impl Int {
 		let (a, b) = (a.view(), b.view());
 		let buf_size = ll::sub_est(&a, &b);
 		let mut r = Self::alloc_buf(buf_size)?;
-		let (neg, len) = ll::sub(&mut r, &a, &b)?;
+		let (neg, len) = ll::sub(&mut r, &a, &b);
 		if len > 1 {
 			Self::new_with_buf(r, len, a.neg ^ neg)
 		} else {

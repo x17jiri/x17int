@@ -45,12 +45,12 @@ pub fn numcpy_est(a: &[Limb]) -> usize {
 }
 
 #[inline]
-pub fn numcpy(r: &mut [Limb], a: &[Limb]) -> Result<usize, Error> {
-	assert(r.len() >= a.len(), || Error::new_buffer_too_small("ll::numcpy()"))?;
+pub fn numcpy(r: &mut [Limb], a: &[Limb]) -> usize {
+	let n = a.len().min(r.len());
 	unsafe {
-		blocks::numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 0, a.len());
+		blocks::numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 0, n);
 	}
-	Ok(a.len())
+	n
 }
 
 #[inline]
@@ -65,56 +65,31 @@ unsafe fn add_unchecked(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> usize {
 	let (a, b) = if a.len() >= b.len() { (a, b) } else { (b, a) };
 
 	let rp = r.as_mut_ptr();
+	let rn = r.len();
 	let ap = a.as_ptr();
-	let an = a.len();
+	let an = a.len().min(r.len());
 	let bp = b.as_ptr();
-	let bn = b.len();
+	let bn = b.len().min(r.len());
 	unsafe {
 		let carry = blocks::add_n_unchecked(rp, ap, bp, 0, bn);
 		let carry = blocks::add_carry_unchecked(rp, ap, carry, bn, an);
-		r.get_unchecked_mut(an).value = carry as Limb::Value;
-		an + (carry as usize)
+		if rn > an {
+			r.get_unchecked_mut(an).value = carry as Limb::Value;
+			an + carry as usize
+		} else {
+			cold_path();
+			trim_unchecked(rp, 0, an)
+		}
 	}
 }
 
 #[inline]
-pub fn add(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> Result<usize, Error> {
-	assert(r.len() > a.len(), || Error::new_buffer_too_small("ll::add()"))?;
+pub fn add(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> usize {
 	unsafe {
 		let len = add_unchecked(r, a, b);
 		assume(len <= r.len());
-		Ok(len)
+		len
 	}
-}
-
-#[inline(always)]
-pub fn add_small<const N: usize>(a: &[Limb; N], b: &[Limb; N]) -> ([Limb; N], bool) {
-	let mut r: [Limb; N] = [Limb { value: 0 }; N];
-	let mut carry = false;
-	for i in 0..N {
-		(r[i], carry) = blocks::add3(a[i], b[i], carry);
-	}
-	(r, carry)
-}
-
-#[inline(always)]
-pub fn sub_small<const N: usize>(a: &[Limb; N], b: &[Limb; N]) -> ([Limb; N], bool) {
-	let mut swapped = false;
-	for i in (0..N).rev() {
-		swapped = a[i] < b[i];
-		if a[i] != b[i] {
-			break;
-		}
-	}
-	let (a, b) = if swapped { (b, a) } else { (a, b) };
-
-	let mut r: [Limb; N] = [Limb { value: 0 }; N];
-	let mut borrow = false;
-	for i in 0..N {
-		(r[i], borrow) = blocks::sub3(a[i], b[i], borrow);
-	}
-	debug_assert!(!borrow);
-	(r, swapped)
 }
 
 /// This function does two things:
@@ -202,12 +177,11 @@ unsafe fn sub_unchecked(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> (bool, usize)
 }
 
 #[inline]
-pub fn sub(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> Result<(bool, usize), Error> {
-	assert(r.len() >= sub_est(a, b), || Error::new_buffer_too_small("ll::sub()"))?;
+pub fn sub(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> (bool, usize) {
 	unsafe {
 		let (neg, len) = sub_unchecked(r, a, b);
 		assume(len <= r.len());
-		Ok((neg, len))
+		(neg, len)
 	}
 }
 
