@@ -283,69 +283,67 @@ mod tests {
 	fn test_numcpy() {
 		unsafe {
 			let a = testvec![15, 17, 19, 21, 23, 25, 27, 29, 31, 33];
-			let mut r = testvec![0, 0];
-			numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 1);
-			assert_eq!(r, testvec![15, 0]);
+			let mut r = testvec![0, 0, 0];
+			numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 1, 2);
+			assert_eq!(r, testvec![0, 17, 0]);
 
 			let mut r = testvec![1, 2, 3];
-			numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 2);
+			numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 0, 2);
 			assert_eq!(r, testvec![15, 17, 3]);
 
 			let mut r = testvec![1, 2, 3, 4, 5, 6, 7, 8];
-			numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 3);
+			numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 0, 3);
 			assert_eq!(r, testvec![15, 17, 19, 4, 5, 6, 7, 8]);
 
 			let mut r = testvec![1, 2, 3, 4, 5, 6, 7, 18];
-			numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 4);
+			numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 0, 4);
 			assert_eq!(r, testvec![15, 17, 19, 21, 5, 6, 7, 18]);
 
 			let mut r = testvec![1, 2, 3, 4, 5, 6, 227, 18];
-			numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 5);
+			numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 0, 5);
 			assert_eq!(r, testvec![15, 17, 19, 21, 23, 6, 227, 18]);
 
 			let a = testvec![115, 17, 119, 21, 123, 25, 127, 29, 131, 33];
 			let mut r = testvec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
-			numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 10);
-			assert_eq!(r, testvec![115, 17, 119, 21, 123, 25, 127, 29, 131, 33, 11, 12, 13]);
+			numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 2, 10);
+			assert_eq!(r, testvec![1, 2, 119, 21, 123, 25, 127, 29, 131, 33, 11, 12, 13]);
 		}
 	}
 
 	#[test]
 	#[rustfmt::skip]
 	fn test_add3() {
-		unsafe {
-			let ZERO = Limb { value: 0 };
-			let ONE = Limb { value: 1 };
-			let THIRD = Limb { value: Limb::MAX / 3 };
-			let TWO_THIRDS = Limb { value: Limb::MAX - THIRD.value };
-			let MAX = Limb { value: Limb::MAX };
+		let ZERO = Limb { value: 0 };
+		let ONE = Limb { value: 1 };
+		let THIRD = Limb { value: Limb::MAX / 3 };
+		let TWO_THIRDS = Limb { value: Limb::MAX - THIRD.value };
+		let MAX = Limb { value: Limb::MAX };
 
-			assert_eq!(add3(ZERO, ZERO, false), (ZERO, false));
-			assert_eq!(add3(ZERO, ZERO, true), (ONE, false));
-			assert_eq!(add3(ZERO, TWO_THIRDS, false), (TWO_THIRDS, false));
-			assert_eq!(add3(ZERO, TWO_THIRDS, true), (Limb { value: 2 * (Limb::MAX / 3) + 1 }, false));
-			assert_eq!(add3(ZERO, MAX, false), (MAX, false));
-			assert_eq!(add3(ZERO, MAX, true), (ZERO, true));
+		assert_eq!(add3(ZERO, ZERO, false), (ZERO, false));
+		assert_eq!(add3(ZERO, ZERO, true), (ONE, false));
+		assert_eq!(add3(ZERO, TWO_THIRDS, false), (TWO_THIRDS, false));
+		assert_eq!(add3(ZERO, TWO_THIRDS, true), (Limb { value: 2 * (Limb::MAX / 3) + 1 }, false));
+		assert_eq!(add3(ZERO, MAX, false), (MAX, false));
+		assert_eq!(add3(ZERO, MAX, true), (ZERO, true));
 
-			assert_eq!(add3(ONE, ZERO, false), (ONE, false));
-			assert_eq!(add3(ONE, ZERO, true), (Limb { value: 2 }, false));
-			assert_eq!(add3(ONE, TWO_THIRDS, false), (Limb { value: 2 * (Limb::MAX / 3) + 1 }, false));
-			assert_eq!(add3(ONE, TWO_THIRDS, true), (Limb { value: 2 * (Limb::MAX / 3) + 2 }, false));
-			assert_eq!(add3(ONE, MAX, false), (ZERO, true));
-			assert_eq!(add3(ONE, MAX, true), (ONE, true));
+		assert_eq!(add3(ONE, ZERO, false), (ONE, false));
+		assert_eq!(add3(ONE, ZERO, true), (Limb { value: 2 }, false));
+		assert_eq!(add3(ONE, TWO_THIRDS, false), (Limb { value: 2 * (Limb::MAX / 3) + 1 }, false));
+		assert_eq!(add3(ONE, TWO_THIRDS, true), (Limb { value: 2 * (Limb::MAX / 3) + 2 }, false));
+		assert_eq!(add3(ONE, MAX, false), (ZERO, true));
+		assert_eq!(add3(ONE, MAX, true), (ONE, true));
 
-			assert_eq!(add3(THIRD, TWO_THIRDS, false), (MAX, false));
-			assert_eq!(add3(THIRD, TWO_THIRDS, true), (Limb { value: 0 }, true));
-			assert_eq!(add3(THIRD, MAX, false), (Limb { value: THIRD.value - 1 }, true));
-			assert_eq!(add3(THIRD, MAX, true), (THIRD, true));
+		assert_eq!(add3(THIRD, TWO_THIRDS, false), (MAX, false));
+		assert_eq!(add3(THIRD, TWO_THIRDS, true), (Limb { value: 0 }, true));
+		assert_eq!(add3(THIRD, MAX, false), (Limb { value: THIRD.value - 1 }, true));
+		assert_eq!(add3(THIRD, MAX, true), (THIRD, true));
 
-			assert_eq!(add3(MAX, ZERO, false), (MAX, false));
-			assert_eq!(add3(MAX, ZERO, true), (ZERO, true));
-			assert_eq!(add3(MAX, TWO_THIRDS, false), (Limb { value: TWO_THIRDS.value - 1 }, true));
-			assert_eq!(add3(MAX, TWO_THIRDS, true), (TWO_THIRDS, true));
-			assert_eq!(add3(MAX, MAX, false), (Limb { value: Limb::MAX - 1 }, true));
-			assert_eq!(add3(MAX, MAX, true), (MAX, true));
-		}
+		assert_eq!(add3(MAX, ZERO, false), (MAX, false));
+		assert_eq!(add3(MAX, ZERO, true), (ZERO, true));
+		assert_eq!(add3(MAX, TWO_THIRDS, false), (Limb { value: TWO_THIRDS.value - 1 }, true));
+		assert_eq!(add3(MAX, TWO_THIRDS, true), (TWO_THIRDS, true));
+		assert_eq!(add3(MAX, MAX, false), (Limb { value: Limb::MAX - 1 }, true));
+		assert_eq!(add3(MAX, MAX, true), (MAX, true));
 	}
 
 	#[test]
@@ -461,13 +459,13 @@ mod tests {
 
 			let a = testvec![HALF, 1, 2, 3, TWO_THIRDS, MAX, MAX];
 			let mut r = testvec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-			let carry = add_1_unchecked(r.as_mut_ptr(), a.as_ptr(), 0, 7, Limb { value: HALF });
+			let carry = add_1_unchecked(r.as_mut_ptr(), a.as_ptr(), Limb { value: HALF }, 0, 7);
 			assert_eq!(r, testvec![HALF + HALF, 1, 2, 3, TWO_THIRDS, MAX, MAX, 7, 8, 9, 10]);
 			assert_eq!(carry, false);
 
 			let a = testvec![TWO_THIRDS, 1, 2, 3, TWO_THIRDS, MAX, MAX];
 			let mut r = testvec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-			let carry = add_1_unchecked(r.as_mut_ptr(), a.as_ptr(), 0, 7, Limb { value: HALF });
+			let carry = add_1_unchecked(r.as_mut_ptr(), a.as_ptr(), Limb { value: HALF }, 0, 7);
 			assert_eq!(
 				r,
 				testvec![TWO_THIRDS - (MAX - HALF) - 1, 2, 2, 3, TWO_THIRDS, MAX, MAX, 7, 8, 9, 10]
@@ -476,7 +474,7 @@ mod tests {
 
 			let a = testvec![TWO_THIRDS, MAX, MAX, MAX, MAX, MAX, MAX];
 			let mut r = testvec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-			let carry = add_1_unchecked(r.as_mut_ptr(), a.as_ptr(), 0, 7, Limb { value: HALF });
+			let carry = add_1_unchecked(r.as_mut_ptr(), a.as_ptr(), Limb { value: HALF }, 0, 7);
 			assert_eq!(r, testvec![TWO_THIRDS - (MAX - HALF) - 1, 0, 0, 0, 0, 0, 0, 7, 8, 9, 10]);
 			assert_eq!(carry, true);
 		}
