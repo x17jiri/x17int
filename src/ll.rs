@@ -8,11 +8,13 @@
 // - Some of them may allocate scratch space on the heap. If it happens, it is documented.
 //   If there is allocation failure, an error is returned and the output buffer is left unchanged.
 //
-// - They don't allocate memory for the result. The caller provides a fixed-size buffer
-//   and the result either fits into it or an error is returned.
+// - They don't allocate memory for the result. The caller provides a fixed-size buffer.
+//
+// - If the buffer is too small, the result will be truncated and only the lower part will be written
 //
 // - There is always a function for estimating the size of the result. For example, for `add()`,
-//   there is `add_est()`. These estimation functions are designed to be fast and may overestimate
+//   there is `add_est()`. These estimation functions are designed to be fast and may overestimate.
+//   When the buffer is at least as big as the estimated size, the result will always fit.
 //
 // - They return length of the result. If `r` is the output buffer and `est_len` is the
 //   estimated buffer size, then:
@@ -20,15 +22,18 @@
 //	   - r[len ..< est_len] may be overwritten
 //	   - r[est_len .. ] is left unchanged
 //
-// - If the inputs don't have any leading zeros, the outputs won't have them either
+// - Returned values don't have leading zeros
 
 use core::ptr::NonNull;
 use std::intrinsics::{assume, cold_path, likely, unlikely};
 use std::num::NonZeroUsize;
 
 pub use crate::blocks::Limb;
-use crate::blocks::{self, trim_unchecked};
+use crate::blocks::{self, numcpy_unchecked, trim_unchecked};
 use crate::error::{assert, Error, ErrorKind};
+
+//--------------------------------------------------------------------------------------------------
+// bit_width
 
 /// Returns the number of bits needed to store the number.
 ///
@@ -39,6 +44,9 @@ pub fn bit_width(a: &[Limb]) -> usize {
 	unsafe { blocks::bit_width_unchecked(a.as_ptr(), a.len()) }
 }
 
+//--------------------------------------------------------------------------------------------------
+// numcpy
+
 #[inline]
 pub fn numcpy_est(a: &[Limb]) -> usize {
 	a.len()
@@ -46,50 +54,115 @@ pub fn numcpy_est(a: &[Limb]) -> usize {
 
 #[inline]
 pub fn numcpy(r: &mut [Limb], a: &[Limb]) -> usize {
-	let n = a.len().min(r.len());
-	unsafe {
-		blocks::numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 0, n);
+	let rp = r.as_mut_ptr();
+	let rn = r.len();
+	let ap = a.as_ptr();
+	let an = a.len();
+	let n = an.min(rn);
+	if n == 0 {
+		cold_path();
+		return 0;
 	}
-	n
+	unsafe {
+		let re = rp.add(n);
+		blocks::numcpy_unchecked(rp, re, ap);
+		blocks::cold_trim_unchecked(rp, 0, n)
+	}
 }
+
+//--------------------------------------------------------------------------------------------------
+// add
 
 #[inline]
 pub fn add_est(a: &[Limb], b: &[Limb]) -> usize {
 	unsafe { a.len().max(b.len()).unchecked_add(1) }
 }
 
-/// `r.len` must be at least `max(a.len, b.len) + 1` even if the final result is shorter.
+#[inline]
+pub fn add(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> usize {
+	let len = __add(r, a, b);
+	unsafe { assume(len <= r.len()) };
+	len
+}
+
 #[inline(never)]
-unsafe fn add_unchecked(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> usize {
+fn __add(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> usize {
 	// Ensure that `a` is not shorter than `b`
 	let (a, b) = if a.len() >= b.len() { (a, b) } else { (b, a) };
 
-	let rp = r.as_mut_ptr();
-	let rn = r.len();
-	let ap = a.as_ptr();
-	let an = a.len().min(r.len());
-	let bp = b.as_ptr();
-	let bn = b.len().min(r.len());
 	unsafe {
+		let (rp, rn) = (r.as_mut_ptr(), r.len());
+		let (ap, an) = (a.as_ptr(), a.len().min(rn));
+		let (bp, bn) = (b.as_ptr(), b.len().min(rn));
+
 		let carry = blocks::add_n_unchecked(rp, ap, bp, 0, bn);
 		let carry = blocks::add_carry_unchecked(rp, ap, carry, bn, an);
-		if rn > an {
-			r.get_unchecked_mut(an).value = carry as Limb::Value;
-			an + carry as usize
-		} else {
-			cold_path();
-			trim_unchecked(rp, 0, an)
-		}
+		let p = rp.add(an);
+		let re = rp.add(rn);
+		let p = //.
+			if p != re {
+				p.write(Limb { value: carry as Limb::Value });
+				p.add(carry as usize)
+			} else {
+				p
+			};
+		blocks::cold_trim_unchecked2(rp, p).sub_ptr(rp)
 	}
 }
 
-#[inline]
-pub fn add(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> usize {
-	unsafe {
-		let len = add_unchecked(r, a, b);
-		assume(len <= r.len());
-		len
+//--------------------------------------------------------------------------------------------------
+// add_
+/*
+pub fn add_(a: &mut [Limb], a_len: usize, b: &[Limb]) -> usize {
+	let len = __add_(a, a_len, b);
+	unsafe { assume(len <= a.len()) };
+	len
+}
+
+#[inline(never)]
+fn __add_(a: &mut [Limb], a_len: usize, b: &[Limb]) -> usize {
+	let r = a as *mut [Limb];
+	let a_len = a_len.min(r.len());
+	let a = &a[..a_len] as *const [Limb];
+	let b_len = b.len().min(r.len());
+	let b = &b[..b_len] as *const [Limb];
+
+	// Ensure that `a` is not shorter than `b`
+	let (a, b) = if a.len() >= b.len() { (a, b) } else { (b, a) };
+
+	let (rp, rn) = (r.as_mut_ptr(), r.len());
+	let (ap, an) = (a.as_ptr(), a.len());
+	let (bp, bn) = (b.as_ptr(), b.len());
+	if an == 0 {
+		cold_path();
+		return 0;
 	}
+	unsafe {
+		let carry = blocks::add_n_unchecked(rp, ap, bp, 0, bn);
+		let carry = blocks::add_carry_unchecked(rp, ap, carry, bn, an);
+		if carry && rn > an {
+			rp.add(an).write(Limb { value: 1 });
+			an + 1
+		} else {
+			blocks::cold_trim_unchecked(rp, 0, an)
+		}
+	}
+}
+*/
+//--------------------------------------------------------------------------------------------------
+// sub
+
+#[inline]
+pub fn sub_est(a: &[Limb], b: &[Limb]) -> usize {
+	a.len().max(b.len())
+}
+
+/// Subtracts `A - B` and returns length of the result and whether the result is negative.
+#[inline]
+pub fn sub(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> (bool, usize) {
+	let (neg, len) = __sub(r, a, b);
+	unsafe { assume(len <= r.len()) };
+	(neg, len)
 }
 
 /// This function does two things:
@@ -147,43 +220,22 @@ fn __prep_sub<'a>(a: &'a [Limb], b: &'a [Limb]) -> (bool, &'a [Limb], &'a [Limb]
 	}
 }
 
-#[inline]
-pub fn sub_est(a: &[Limb], b: &[Limb]) -> usize {
-	a.len().max(b.len())
-}
-
-/// `r.len` must be at least `max(a.len, b.len)` even if the final result is shorter.
-///
-/// Writes to `r` and returns `(neg, n)` where:
-///      r[0..<n] = abs(a - b)
-///      neg = a < b
 #[inline(never)]
-unsafe fn sub_unchecked(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> (bool, usize) {
+fn __sub(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> (bool, usize) {
 	// Ensure that `a` is not smaller than `b`
 	let (swapped, a, b) = __prep_sub(a, b);
 
-	let rp = r.as_mut_ptr();
-	let ap = a.as_ptr();
-	let an = a.len();
-	let bp = b.as_ptr();
-	let bn = b.len();
+	let (rp, rn) = (r.as_mut_ptr(), r.len());
+	let (ap, an) = (a.as_ptr(), a.len().min(rn));
+	let (bp, bn) = (b.as_ptr(), b.len().min(rn));
 	unsafe {
 		let borrow = blocks::sub_n_unchecked(rp, ap, bp, 0, bn);
-		let borrow = blocks::sub_borrow_unchecked(rp, ap, borrow, bn, an);
-		debug_assert!(!borrow);
-		let rn = trim_unchecked(rp, 0, an);
-		(swapped, rn)
+		let _borrow = blocks::sub_borrow_unchecked(rp, ap, borrow, bn, an);
+		(swapped, trim_unchecked(rp, 0, an))
 	}
 }
 
-#[inline]
-pub fn sub(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> (bool, usize) {
-	unsafe {
-		let (neg, len) = sub_unchecked(r, a, b);
-		assume(len <= r.len());
-		(neg, len)
-	}
-}
+//--------------------------------------------------------------------------------------------------
 
 #[macro_use]
 #[cfg(test)]
@@ -207,25 +259,23 @@ mod tests {
 	fn test_numcpy() {
 		let a = testvec![];
 		let mut r = testvec![];
-		assert_eq!(numcpy(r.as_mut_slice(), a.as_slice()), Ok(0));
+		assert_eq!(numcpy(r.as_mut_slice(), a.as_slice()), 0);
 		assert_eq!(r, testvec![]);
 
 		let a = testvec![1, 2, 3];
 		let mut r = testvec![0, 0, 0];
-		assert_eq!(numcpy(r.as_mut_slice(), a.as_slice()), Ok(3));
+		assert_eq!(numcpy(r.as_mut_slice(), a.as_slice()), 3);
 		assert_eq!(r, testvec![1, 2, 3]);
 
 		let a = testvec![1, 2, 3];
 		let mut r = testvec![0, 0, 0, 0];
-		assert_eq!(numcpy(r.as_mut_slice(), a.as_slice()), Ok(3));
+		assert_eq!(numcpy(r.as_mut_slice(), a.as_slice()), 3);
 		assert_eq!(r, testvec![1, 2, 3, 0]);
 
 		let a = testvec![1, 2, 3];
 		let mut r = testvec![0, 0];
-		let err = numcpy(r.as_mut_slice(), a.as_slice());
-		assert_eq!(err.is_err(), true);
-		assert_eq!(err.err().unwrap().kind, ErrorKind::BufferTooSmall);
-		assert_eq!(r, testvec![0, 0]);
+		assert_eq!(numcpy(r.as_mut_slice(), a.as_slice()), 2);
+		assert_eq!(r, testvec![1, 2]);
 	}
 
 	#[test]
@@ -235,39 +285,37 @@ mod tests {
 		let a = testvec![];
 		let b = testvec![];
 		let mut r = testvec![100, 101, 102];
-		assert_eq!(add(r.as_mut_slice(), a.as_slice(), b.as_slice()), Ok(0));
-		assert_eq!(r, testvec![0, 101, 102]);
+		assert_eq!(add(r.as_mut_slice(), a.as_slice(), b.as_slice()), 0);
+		assert_eq!(r, testvec![100, 101, 102]);
 
 		let a = testvec![1, 2, 3];
 		let b = testvec![4, 5, 6];
 		let mut r = testvec![100, 101, 102, 103];
-		assert_eq!(add(r.as_mut_slice(), a.as_slice(), b.as_slice()), Ok(3));
-		assert_eq!(r, testvec![5, 7, 9, 0]);
+		assert_eq!(add(r.as_mut_slice(), a.as_slice(), b.as_slice()), 3);
+		assert_eq!(r, testvec![5, 7, 9, 103]);
 
 		let a = testvec![1, 2, 3];
 		let b = testvec![4, 5];
 		let mut r = testvec![100, 101, 102, 103];
-		assert_eq!(add(r.as_mut_slice(), a.as_slice(), b.as_slice()), Ok(3));
-		assert_eq!(r, testvec![5, 7, 3, 0]);
+		assert_eq!(add(r.as_mut_slice(), a.as_slice(), b.as_slice()), 3);
+		assert_eq!(r, testvec![5, 7, 3, 103]);
 
 		let a = testvec![1, 2];
 		let b = testvec![4, 5, 6];
 		let mut r = testvec![100, 101, 102, 103];
-		assert_eq!(add(r.as_mut_slice(), a.as_slice(), b.as_slice()), Ok(3));
-		assert_eq!(r, testvec![5, 7, 6, 0]);
+		assert_eq!(add(r.as_mut_slice(), a.as_slice(), b.as_slice()), 3);
+		assert_eq!(r, testvec![5, 7, 6, 103]);
 
 		let a = testvec![MAX, MAX, MAX];
 		let b = testvec![MAX];
 		let mut r = testvec![100, 101, 102, 103];
-		assert_eq!(add(r.as_mut_slice(), a.as_slice(), b.as_slice()), Ok(4));
+		assert_eq!(add(r.as_mut_slice(), a.as_slice(), b.as_slice()), 4);
 		assert_eq!(r, testvec![MAX - 1, 0, 0, 1]);
 
 		let a = testvec![MAX, MAX, MAX];
 		let b = testvec![MAX];
 		let mut r = testvec![100, 101, 102];
-		let err = add(r.as_mut_slice(), a.as_slice(), b.as_slice());
-		assert_eq!(err.is_err(), true);
-		assert_eq!(err.err().unwrap().kind, ErrorKind::BufferTooSmall);
-		assert_eq!(r, testvec![100, 101, 102]);
+		assert_eq!(add(r.as_mut_slice(), a.as_slice(), b.as_slice()), 1);
+		assert_eq!(r, testvec![MAX - 1, 0, 0]);
 	}
 }

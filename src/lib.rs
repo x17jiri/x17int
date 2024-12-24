@@ -5,6 +5,7 @@
 #![feature(generic_const_exprs)]
 #![feature(slice_ptr_get)]
 #![feature(let_chains)]
+#![feature(ptr_sub_ptr)]
 //
 #![allow(non_snake_case)]
 #![allow(unused_imports)]
@@ -44,14 +45,14 @@ macro_rules! testvec {
 
 const MIN_ALLOC_SIZE: usize = 3;
 
-enum ViewKind {
+pub enum ViewKind {
 	Small,
 	Large,
 }
 
-struct IntView<'a> {
-	kind: ViewKind,
-	neg: bool,
+pub struct IntView<'a> {
+	pub kind: ViewKind,
+	pub neg: bool,
 	len: usize,
 	limbs: NonNull<ll::Limb>,
 	phantom: std::marker::PhantomData<&'a ll::Limb>,
@@ -65,9 +66,9 @@ impl<'a> Deref for IntView<'a> {
 	}
 }
 
-struct NonZeroIntView<'a> {
-	kind: ViewKind,
-	neg: bool,
+pub struct NonZeroIntView<'a> {
+	pub kind: ViewKind,
+	pub neg: bool,
 	len: NonZeroUsize,
 	limbs: NonNull<ll::Limb>,
 	phantom: std::marker::PhantomData<&'a ll::Limb>,
@@ -123,8 +124,8 @@ impl Drop for OwnedBuffer {
 	}
 }
 
-struct BufView<'a> {
-	kind: ViewKind,
+pub struct BufView<'a> {
+	pub kind: ViewKind,
 	cap: NonZeroUsize,
 	limbs: NonNull<ll::Limb>,
 	phantom: std::marker::PhantomData<&'a ll::Limb>,
@@ -221,16 +222,12 @@ impl Int {
 	}
 
 	/// A number is considered "small" if it stores all the data locally and doesn't use the heap.
-	pub fn is_small(&self) -> bool {
+	fn is_small(&self) -> bool {
 		self.vec.ptr().is_none()
 	}
 
-	pub fn are_both_small(a: &Int, b: &Int) -> bool {
+	fn are_both_small(a: &Int, b: &Int) -> bool {
 		TaggedPtr::are_both_null(a.vec, b.vec)
-	}
-
-	pub fn are_both_zero(a: &Int, b: &Int) -> bool {
-		(a.magn.value | b.magn.value) == 0
 	}
 
 	fn __buf_view<'a>(&'a self) -> BufView<'a> {
@@ -359,35 +356,15 @@ impl Int {
 		match view.kind {
 			ViewKind::Small => Ok(Self { vec: self.vec, magn: self.magn }),
 			ViewKind::Large => {
-				let len = ll::numcpy_est(&view);
-				let mut r = Self::alloc_buf(len)?;
+				let mut r = Self::alloc_buf(ll::numcpy_est(&view))?;
 				let len = ll::numcpy(&mut r, &view);
 				Self::new_with_buf(r, len, view.neg)
 			},
 		}
 	}
 
-	/*	#[inline(never)]
-	#[must_use]
-	pub fn try_assign(&mut self, a: &Int) -> Result<(), Error> {
-		let A = a.view();
-		let buf_size = numcpy_est(A.as_slice());
-		let mut inline_buf = buf::InlineBuffer::default();
-		let mut buf = buf::Buffer::new(self, buf_size, &mut inline_buf)?;
-
-		let r_len = ll::numcpy(buf.as_slice(), A.as_slice())?;
-		let r_neg = A.neg;
-
-		buf.commit(r_len, r_neg)
-	}*/
-
-	/*	#[inline(never)]
-	pub fn assign(&mut self, a: &Int) {
-		self.try_assign(a).unwrap()
-	}*/
-
 	#[inline(always)]
-	pub fn try_add_small(a: &Int, b: &Int) -> Option<Int> {
+	fn try_add_small(a: &Int, b: &Int) -> Option<Int> {
 		if !Self::are_both_small(a, b) {
 			return None;
 		}
@@ -400,7 +377,7 @@ impl Int {
 	}
 
 	#[inline(always)]
-	pub fn try_sub_small(a: &Int, b: &Int) -> Option<Int> {
+	fn try_sub_small(a: &Int, b: &Int) -> Option<Int> {
 		if !Self::are_both_small(a, b) {
 			return None;
 		}
@@ -409,43 +386,57 @@ impl Int {
 	}
 
 	#[inline(never)]
-	fn __add(a: &Int, b: &Int) -> Result<Int, Error> {
-		let (a, b) = (a.view(), b.view());
-		let buf_size = ll::add_est(&a, &b);
-		let mut r = Self::alloc_buf(buf_size)?;
-		let len = ll::add(&mut r, &a, &b);
-		Self::new_with_buf(r, len, a.neg)
-	}
-
-	#[inline(never)]
-	fn __sub(a: &Int, b: &Int) -> Result<Int, Error> {
-		let (a, b) = (a.view(), b.view());
-		let buf_size = ll::sub_est(&a, &b);
-		let mut r = Self::alloc_buf(buf_size)?;
-		let (neg, len) = ll::sub(&mut r, &a, &b);
-		if len > 1 {
-			Self::new_with_buf(r, len, a.neg ^ neg)
-		} else {
-			Ok(Self::new_inline(r[0], a.neg ^ neg))
-		}
-	}
-
-	#[inline(never)]
 	pub fn try_add_or_sub(a: &Int, sub: bool, b: &Int) -> Result<Int, Error> {
 		let sub = a.is_negative() ^ (sub ^ b.is_negative());
 		if sub {
 			if let Some(small) = Self::try_sub_small(a, b) {
-				Ok(small)
-			} else {
-				Self::__sub(a, b)
+				return Ok(small);
 			}
 		} else {
 			if let Some(small) = Self::try_add_small(a, b) {
-				Ok(small)
-			} else {
-				Self::__add(a, b)
+				return Ok(small);
 			}
 		}
+
+		// slow path
+		let a = a.view();
+		let b = b.view();
+		if sub {
+			let mut r = Self::alloc_buf(ll::sub_est(&a, &b))?;
+			let (neg, len) = ll::sub(&mut r, &a, &b);
+			if len > Self::ONE_LIMB {
+				Self::new_with_buf(r, len, a.neg ^ neg)
+			} else {
+				let value = if len == 0 { 0 } else { r[0].value };
+				Ok(Self::new_inline(Limb { value }, a.neg ^ neg))
+			}
+		} else {
+			let mut r = Self::alloc_buf(ll::add_est(&a, &b))?;
+			let len = ll::add(&mut r, &a, &b);
+			Self::new_with_buf(r, len, a.neg)
+		}
+	}
+
+	#[inline]
+	pub fn try_add(a: &Int, b: &Int) -> Result<Int, Error> {
+		Self::try_add_or_sub(a, false, b)
+	}
+
+	#[inline]
+	pub fn try_sub(a: &Int, b: &Int) -> Result<Int, Error> {
+		Self::try_add_or_sub(a, true, b)
+	}
+
+	pub fn add_or_sub(a: &Int, sub: bool, b: &Int) -> Int {
+		Self::try_add_or_sub(a, sub, b).unwrap()
+	}
+
+	pub fn add(a: &Int, b: &Int) -> Int {
+		Self::try_add_or_sub(a, false, b).unwrap()
+	}
+
+	pub fn sub(a: &Int, b: &Int) -> Int {
+		Self::try_add_or_sub(a, true, b).unwrap()
 	}
 }
 

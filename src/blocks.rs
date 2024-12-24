@@ -46,60 +46,55 @@ pub unsafe fn bit_width_unchecked(a: *const Limb, n: usize) -> usize {
 /// Preconditions:
 /// - i <= n
 /// - rp[0..<n] and ap[0..<n] are valid slices
-/// - allowed overlap: rp == ap or no overlap
 #[inline]
-pub unsafe fn numcpy_unchecked(rp: *mut Limb, ap: *const Limb, i: usize, n: usize) {
-	debug_assert!(i <= n);
-	debug_assert!(rp as *const Limb == ap || has_no_overlap(rp, n, ap, n));
+pub unsafe fn numcpy_unchecked(mut rp: *mut Limb, re: *mut Limb, mut ap: *const Limb) {
+	unsafe {
+		if rp == re {
+			return;
+		}
 
-	if i == n || rp as *const Limb == ap {
-		return;
-	}
+		let d = re.sub_ptr(rp);
+		if d < 4 {
+			rp.write(ap.add(0).read());
+			rp = rp.add(1);
+			ap = ap.add(1);
+			if rp == re {
+				return;
+			}
 
-	let rp = rp.add(i);
-	let ap = ap.add(i);
-	let n = n.unchecked_sub(i);
+			rp.write(ap.add(0).read());
+			rp = rp.add(1);
+			ap = ap.add(1);
+			if rp == re {
+				return;
+			}
 
-	// I think there is a reasonable chance that 'n' will be
-	// just a few limbs. So try to have the code for this case inlined.
-	if n <= 4 {
-		let a: usize = 0;
-		let b: usize = n >> 2;
-		let c: usize = n >> 1;
-		let d: usize = n - 1;
-
-		// n || a | b | c | d
-		// ------------------
-		// 1 || 0 | 0 | 0 | 0
-		// 2 || 0 | 0 | 1 | 1
-		// 3 || 0 | 0 | 1 | 2
-		// 4 || 0 | 1 | 2 | 3
-
-		rp.offset(a as isize).write(ap.offset(a as isize).read());
-		rp.offset(b as isize).write(ap.offset(b as isize).read());
-		rp.offset(c as isize).write(ap.offset(c as isize).read());
-		rp.offset(d as isize).write(ap.offset(d as isize).read());
-	} else {
-		std::ptr::copy_nonoverlapping(ap, rp, n);
+			rp.write(ap.add(0).read());
+		} else {
+			std::ptr::copy_nonoverlapping(ap, rp, d);
+		}
 	}
 }
 
 #[inline]
 pub unsafe fn negcpy_unchecked(rp: *mut Limb, ap: *const Limb, i: usize, n: usize) {
 	debug_assert!(i <= n);
-	debug_assert!(rp as *const Limb == ap || has_no_overlap(rp, n, ap, n));
-
-	for i in i..n {
-		rp.add(i).write(Limb { value: !ap.add(i).read().value });
+	debug_assert!(has_no_overlap(rp, n, ap, n));
+	unsafe {
+		for i in i..n {
+			rp.add(i).write(Limb { value: !ap.add(i).read().value });
+		}
 	}
 }
 
 pub unsafe fn trim_unchecked(p: *const Limb, i: usize, mut n: usize) -> usize {
 	debug_assert!(i <= n);
-	while n != i && p.add(n - 1).read().value == 0 {
-		n -= 1;
+	unsafe {
+		while i != n && p.add(n.unchecked_sub(1)).read().value == 0 {
+			n = n.unchecked_sub(1);
+		}
+		n
 	}
-	n
 }
 
 /// This is like `trim_unchecked()`, but it assumes that the highest limb is probably non-zero and
@@ -107,11 +102,28 @@ pub unsafe fn trim_unchecked(p: *const Limb, i: usize, mut n: usize) -> usize {
 #[inline(always)]
 pub unsafe fn cold_trim_unchecked(p: *const Limb, i: usize, n: usize) -> usize {
 	debug_assert!(i <= n);
-	if i == n || p.add(n - 1).read().value != 0 {
-		n
-	} else {
-		cold_path();
-		trim_unchecked(p, i, n - 1)
+	unsafe {
+		if i == n || p.add(n.unchecked_sub(1)).read().value != 0 {
+			n
+		} else {
+			cold_path();
+			trim_unchecked(p, i, n.unchecked_sub(1))
+		}
+	}
+}
+
+#[inline(always)]
+pub unsafe fn cold_trim_unchecked2(rp: *const Limb, mut re: *const Limb) -> *const Limb {
+	unsafe {
+		if rp == re || re.offset(-1).read().value != 0 {
+			re
+		} else {
+			cold_path();
+			while rp != re && re.offset(-1).read().value == 0 {
+				re = re.offset(-1);
+			}
+			re
+		}
 	}
 }
 
@@ -125,76 +137,89 @@ pub fn add3(a: Limb, b: Limb, carry: bool) -> (Limb, bool) {
 pub unsafe fn add_n_unchecked(
 	rp: *mut Limb, ap: *const Limb, bp: *const Limb, i: usize, n: usize,
 ) -> bool {
-	debug_assert!(rp as *const Limb == ap || has_no_overlap(rp, n, ap, n));
-	debug_assert!(rp as *const Limb == bp || has_no_overlap(rp, n, bp, n));
+	unsafe {
+		let re = rp.add(n);
+		let mut rp = rp.add(i);
+		let mut ap = ap.add(i);
+		let mut bp = bp.add(i);
 
-	let mut carry = false;
-	for i in i..n {
-		let a = ap.add(i).read();
-		let b = bp.add(i).read();
-		let (s, c) = add3(a, b, carry);
-		rp.add(i).write(s);
-		carry = c;
+		let mut carry = false;
+		while rp != re {
+			let (sum, overflow) = add3(ap.read(), bp.read(), carry);
+			rp.write(sum);
+			carry = overflow;
+
+			rp = rp.add(1);
+			ap = ap.add(1);
+			bp = bp.add(1);
+		}
+
+		carry
 	}
-	carry
 }
 
 pub unsafe fn add_carry_unchecked(
-	rp: *mut Limb, ap: *const Limb, mut carry: bool, i: usize, n: usize,
+	rp: *mut Limb, ap: *const Limb, carry: bool, i: usize, n: usize,
 ) -> bool {
-	debug_assert!(rp as *const Limb == ap || has_no_overlap(rp, n, ap, n));
+	debug_assert!(has_no_overlap(rp, n, ap, n));
+	unsafe {
+		let re = rp.add(n);
+		let mut rp = rp.add(i);
+		let mut ap = ap.add(i);
 
-	let mut i = i;
-	while carry {
-		if i == n {
-			return true;
+		let mut carry = carry;
+		while rp != re {
+			if !carry {
+				numcpy_unchecked(rp, re, ap);
+				return false;
+			}
+
+			let (sum, overflow) = ap.read().value.overflowing_add(1);
+			rp.write(Limb { value: sum });
+			carry = overflow;
+
+			rp = rp.add(1);
+			ap = ap.add(1);
 		}
 
-		let a = ap.add(i).read().value;
-		let s = a.wrapping_add(1);
-		rp.add(i).write(Limb { value: s });
-		carry = s == 0;
-
-		i += 1;
+		carry
 	}
-
-	numcpy_unchecked(rp, ap, i, n);
-	false
 }
 
 pub unsafe fn neg_add_carry_unchecked(
 	rp: *mut Limb, ap: *const Limb, mut carry: bool, i: usize, n: usize,
 ) -> bool {
-	debug_assert!(rp as *const Limb == ap || has_no_overlap(rp, n, ap, n));
+	debug_assert!(has_no_overlap(rp, n, ap, n));
+	unsafe {
+		let mut i = i;
+		while carry {
+			if i == n {
+				return true;
+			}
 
-	let mut i = i;
-	while carry {
-		if i == n {
-			return true;
+			let a = !ap.add(i).read().value;
+			let s = a.wrapping_add(1);
+			rp.add(i).write(Limb { value: s });
+			carry = s == 0;
+
+			i = i.unchecked_add(1);
 		}
 
-		let a = !ap.add(i).read().value;
-		let s = a.wrapping_add(1);
-		rp.add(i).write(Limb { value: s });
-		carry = s == 0;
-
-		i += 1;
+		negcpy_unchecked(rp, ap, i, n);
+		false
 	}
-
-	negcpy_unchecked(rp, ap, i, n);
-	false
 }
 
-pub unsafe fn add_1_unchecked(rp: *mut Limb, ap: *const Limb, b: Limb, i: usize, n: usize) -> bool {
+/*pub unsafe fn add_1_unchecked(rp: *mut Limb, ap: *const Limb, b: Limb, i: usize, n: usize) -> bool {
 	debug_assert!(i < n);
-	// TODO - when checking overlap, we should consider `i` as well
-	debug_assert!(rp as *const Limb == ap || has_no_overlap(rp, n, ap, n));
-
-	let a = ap.add(i).read();
-	let (s, carry) = add3(a, b, false);
-	rp.add(i).write(s);
-	add_carry_unchecked(rp, ap, carry, i + 1, n)
-}
+	debug_assert!(has_no_overlap(rp, n, ap, n));
+	unsafe {
+		let a = ap.add(i).read();
+		let (s, carry) = add3(a, b, false);
+		rp.add(i).write(s);
+		add_carry_unchecked(rp, ap, carry, i.unchecked_add(1), n)
+	}
+}*/
 
 #[inline]
 pub fn sub3(a: Limb, b: Limb, borrow: bool) -> (Limb, bool) {
@@ -206,51 +231,69 @@ pub fn sub3(a: Limb, b: Limb, borrow: bool) -> (Limb, bool) {
 pub unsafe fn sub_n_unchecked(
 	rp: *mut Limb, ap: *const Limb, bp: *const Limb, i: usize, n: usize,
 ) -> bool {
-	debug_assert!(rp as *const Limb == ap || has_no_overlap(rp, n, ap, n));
-	debug_assert!(rp as *const Limb == bp || has_no_overlap(rp, n, bp, n));
+	debug_assert!(has_no_overlap(rp, n, ap, n));
+	debug_assert!(has_no_overlap(rp, n, bp, n));
+	unsafe {
+		let re = rp.add(n);
+		let mut rp = rp.add(i);
+		let mut ap = ap.add(i);
+		let mut bp = bp.add(i);
 
-	let mut borrow = false;
-	for i in i..n {
-		let a = ap.add(i).read();
-		let b = bp.add(i).read();
-		let (d, b) = sub3(a, b, borrow);
-		rp.add(i).write(d);
-		borrow = b;
+		let mut borrow = false;
+		while rp != re {
+			let (d, b) = sub3(ap.read(), bp.read(), borrow);
+			rp.write(d);
+			borrow = b;
+
+			rp = rp.add(1);
+			ap = ap.add(1);
+			bp = bp.add(1);
+		}
+		borrow
 	}
-	borrow
 }
 
 pub unsafe fn sub_borrow_unchecked(
-	rp: *mut Limb, ap: *const Limb, mut borrow: bool, i: usize, n: usize,
+	rp: *mut Limb, ap: *const Limb, borrow: bool, i: usize, n: usize,
 ) -> bool {
-	debug_assert!(rp as *const Limb == ap || has_no_overlap(rp, n, ap, n));
+	debug_assert!(has_no_overlap(rp, n, ap, n));
+	unsafe {
+		let re = rp.add(n);
+		let mut rp = rp.add(i);
+		let mut ap = ap.add(i);
 
-	let mut i = i;
-	while borrow {
-		if i == n {
-			return true;
+		let mut borrow = borrow;
+		while borrow {
+			if rp == re {
+				return true;
+			}
+
+			let a = ap.read();
+			borrow = a.value == 0;
+			rp.write(Limb { value: a.value.wrapping_sub(1) });
+
+			rp = rp.add(1);
+			ap = ap.add(1);
 		}
-
-		let a = ap.add(i).read();
-		borrow = a.value == 0;
-		rp.add(i).write(Limb { value: a.value.wrapping_sub(1) });
-
-		i += 1;
 	}
-
-	numcpy_unchecked(rp, ap, i, n);
-	false
+	unsafe {
+		let re = rp.add(n);
+		let rp = rp.add(i);
+		let ap = ap.add(i);
+		numcpy_unchecked(rp, re, ap);
+		false
+	}
 }
 
 pub unsafe fn sub_1_unchecked(rp: *mut Limb, ap: *const Limb, b: Limb, i: usize, n: usize) -> bool {
 	debug_assert!(i < n);
-	// TODO - when checking overlap, we should consider `i` as well
-	debug_assert!(rp as *const Limb == ap || has_no_overlap(rp, n, ap, n));
-
-	let a = ap.add(i).read();
-	let (d, borrow) = sub3(a, b, false);
-	rp.add(i).write(d);
-	sub_borrow_unchecked(rp, ap, borrow, i + 1, n)
+	debug_assert!(has_no_overlap(rp, n, ap, n));
+	unsafe {
+		let a = ap.add(i).read();
+		let (d, borrow) = sub3(a, b, false);
+		rp.add(i).write(d);
+		sub_borrow_unchecked(rp, ap, borrow, i + 1, n)
+	}
 }
 
 #[cfg(test)]
