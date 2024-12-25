@@ -28,8 +28,8 @@ use core::ptr::NonNull;
 use std::intrinsics::{assume, cold_path, likely, unlikely};
 use std::num::NonZeroUsize;
 
+use crate::blocks;
 pub use crate::blocks::Limb;
-use crate::blocks::{self, numcpy_unchecked, trim_unchecked};
 use crate::error::{assert, Error, ErrorKind};
 
 //--------------------------------------------------------------------------------------------------
@@ -56,13 +56,16 @@ pub fn numcpy_est(a: &[Limb]) -> usize {
 pub fn numcpy(r: &mut [Limb], a: &[Limb]) -> usize {
 	let rp = r.as_mut_ptr();
 	let rn = r.len();
+
 	let ap = a.as_ptr();
 	let an = a.len();
+
 	let n = an.min(rn);
 	if n == 0 {
 		cold_path();
 		return 0;
 	}
+
 	unsafe {
 		let re = rp.add(n);
 		blocks::numcpy_unchecked(rp, re, ap);
@@ -91,64 +94,39 @@ fn __add(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> usize {
 	let (a, b) = if a.len() >= b.len() { (a, b) } else { (b, a) };
 
 	unsafe {
-		let (rp, rn) = (r.as_mut_ptr(), r.len());
-		let (ap, an) = (a.as_ptr(), a.len().min(rn));
-		let (bp, bn) = (b.as_ptr(), b.len().min(rn));
+		let rp = r.as_mut_ptr();
+		let ap = a.as_ptr();
+		let bp = b.as_ptr();
 
-		let carry = blocks::add_n_unchecked(rp, ap, bp, 0, bn);
-		let carry = blocks::add_carry_unchecked(rp, ap, carry, bn, an);
-		let p = rp.add(an);
-		let re = rp.add(rn);
-		let p = //.
-			if p != re {
-				p.write(Limb { value: carry as Limb::Value });
-				p.add(carry as usize)
+		let rn = r.len();
+
+		let (an, bn) = //.
+			if rn > a.len() {
+				(a.len(), b.len())
 			} else {
-				p
+				cold_path();
+				(rn, b.len().min(rn))
 			};
-		blocks::cold_trim_unchecked2(rp, p).sub_ptr(rp)
-	}
-}
 
-//--------------------------------------------------------------------------------------------------
-// add_
-/*
-pub fn add_(a: &mut [Limb], a_len: usize, b: &[Limb]) -> usize {
-	let len = __add_(a, a_len, b);
-	unsafe { assume(len <= a.len()) };
-	len
-}
+		if an == 0 {
+			return 0;
+		}
 
-#[inline(never)]
-fn __add_(a: &mut [Limb], a_len: usize, b: &[Limb]) -> usize {
-	let r = a as *mut [Limb];
-	let a_len = a_len.min(r.len());
-	let a = &a[..a_len] as *const [Limb];
-	let b_len = b.len().min(r.len());
-	let b = &b[..b_len] as *const [Limb];
-
-	// Ensure that `a` is not shorter than `b`
-	let (a, b) = if a.len() >= b.len() { (a, b) } else { (b, a) };
-
-	let (rp, rn) = (r.as_mut_ptr(), r.len());
-	let (ap, an) = (a.as_ptr(), a.len());
-	let (bp, bn) = (b.as_ptr(), b.len());
-	if an == 0 {
-		cold_path();
-		return 0;
-	}
-	unsafe {
 		let carry = blocks::add_n_unchecked(rp, ap, bp, 0, bn);
 		let carry = blocks::add_carry_unchecked(rp, ap, carry, bn, an);
-		if carry && rn > an {
-			rp.add(an).write(Limb { value: 1 });
-			an + 1
-		} else {
-			blocks::cold_trim_unchecked(rp, 0, an)
-		}
+
+		let len = //.
+			if an != rn {
+				rp.add(an).write(Limb { value: carry as Limb::Value });
+				an.unchecked_add(carry as usize)
+			} else {
+				cold_path();
+				an
+			};
+		blocks::cold_trim_unchecked(rp, 0, len)
 	}
 }
-*/
+
 //--------------------------------------------------------------------------------------------------
 // sub
 
@@ -185,6 +163,9 @@ fn __prep_sub<'a>(a: &'a [Limb], b: &'a [Limb]) -> (bool, &'a [Limb], &'a [Limb]
 		let (a, b) = if swapped { (b, a) } else { (a, b) };
 
 		unsafe {
+			assume(a.len() > b.len());
+			assume(a.len() > 0);
+
 			if a.get_unchecked(a.len() - 1).value != 0 {
 				// The highest limb of A is non-zero. We're done.
 				return (swapped, a, b);
@@ -192,9 +173,8 @@ fn __prep_sub<'a>(a: &'a [Limb], b: &'a [Limb]) -> (bool, &'a [Limb], &'a [Limb]
 				// The highest limb of A is zero. We need to trim it.
 				cold_path();
 
-				assume(a.len() > b.len());
 				let a_len = blocks::trim_unchecked(a.as_ptr(), b.len(), a.len() - 1);
-				if a_len > b.len() {
+				if a_len != b.len() {
 					return (swapped, a.get_unchecked(..a_len), b);
 				}
 
@@ -228,10 +208,25 @@ fn __sub(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> (bool, usize) {
 	let (rp, rn) = (r.as_mut_ptr(), r.len());
 	let (ap, an) = (a.as_ptr(), a.len().min(rn));
 	let (bp, bn) = (b.as_ptr(), b.len().min(rn));
+
+	if an == 0 {
+		return (false, 0);
+	}
+
 	unsafe {
 		let borrow = blocks::sub_n_unchecked(rp, ap, bp, 0, bn);
 		let _borrow = blocks::sub_borrow_unchecked(rp, ap, borrow, bn, an);
-		(swapped, trim_unchecked(rp, 0, an))
+
+		// trim leading zeros
+		let mut an = an;
+		while rp.add(an.unchecked_sub(1)).read().value == 0 {
+			an = an.unchecked_sub(1);
+			if an == 0 {
+				break;
+			}
+		}
+
+		(swapped, an)
 	}
 }
 

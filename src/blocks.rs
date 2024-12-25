@@ -241,14 +241,15 @@ pub unsafe fn sub_n_unchecked(
 
 		let mut borrow = false;
 		while rp != re {
-			let (d, b) = sub3(ap.read(), bp.read(), borrow);
-			rp.write(d);
-			borrow = b;
+			let (diff, underflow) = sub3(ap.read(), bp.read(), borrow);
+			rp.write(diff);
+			borrow = underflow;
 
 			rp = rp.add(1);
 			ap = ap.add(1);
 			bp = bp.add(1);
 		}
+
 		borrow
 	}
 }
@@ -263,25 +264,21 @@ pub unsafe fn sub_borrow_unchecked(
 		let mut ap = ap.add(i);
 
 		let mut borrow = borrow;
-		while borrow {
-			if rp == re {
-				return true;
+		while rp != re {
+			if !borrow {
+				numcpy_unchecked(rp, re, ap);
+				return false;
 			}
 
-			let a = ap.read();
-			borrow = a.value == 0;
-			rp.write(Limb { value: a.value.wrapping_sub(1) });
+			let (diff, underflow) = ap.read().value.overflowing_sub(1);
+			rp.write(Limb { value: diff });
+			borrow = underflow;
 
 			rp = rp.add(1);
 			ap = ap.add(1);
 		}
-	}
-	unsafe {
-		let re = rp.add(n);
-		let rp = rp.add(i);
-		let ap = ap.add(i);
-		numcpy_unchecked(rp, re, ap);
-		false
+
+		borrow
 	}
 }
 
