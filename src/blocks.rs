@@ -2,13 +2,100 @@ use std::intrinsics::{assume, cold_path};
 
 #[derive(Clone, Copy, Default, PartialEq, Debug, Eq, Ord, PartialOrd)]
 pub struct Limb {
-	pub value: usize,
+	pub val: usize,
 }
 
 impl Limb {
 	pub type Value = usize;
 	pub const BITS: usize = usize::BITS as usize;
 	pub const MAX: Self::Value = usize::MAX;
+
+	#[inline]
+	pub fn zero() -> Self {
+		Self { val: 0 }
+	}
+
+	#[inline]
+	pub fn one() -> Self {
+		Self { val: 1 }
+	}
+
+	#[inline]
+	pub fn new(val: usize) -> Self {
+		Self { val }
+	}
+
+	#[inline]
+	pub fn is_zero(&self) -> bool {
+		self.val == 0
+	}
+
+	#[inline]
+	pub fn is_not_zero(&self) -> bool {
+		self.val != 0
+	}
+
+	#[inline]
+	pub fn bit_width(self) -> usize {
+		unsafe { Self::BITS.unchecked_sub((self.val | 1).leading_zeros() as usize) }
+	}
+
+	#[inline]
+	pub fn bit_neg(self) -> Self {
+		Self { val: !self.val }
+	}
+
+	#[inline]
+	pub fn addc(a: Limb, b: Limb, c: bool) -> (Limb, bool) {
+		let (sum, overflow1) = a.val.overflowing_add(b.val);
+		let (sum, overflow2) = sum.overflowing_add(c as usize);
+		(Limb { val: sum }, overflow1 | overflow2)
+	}
+
+	#[inline]
+	pub fn sum<const N: usize>(a: [Limb; N]) -> [Limb; 2] {
+		const _: () =
+			assert!(std::mem::size_of::<u128>() >= 2 * std::mem::size_of::<Limb::Value>());
+		let mut t: u128 = a[0].val as u128;
+		for i in 1..N {
+			t += a[i].val as u128;
+		}
+		[
+			Limb {
+				val: t as Limb::Value, //
+			},
+			Limb {
+				val: (t >> Limb::BITS) as Limb::Value, //
+			},
+		]
+	}
+
+	#[inline]
+	pub fn subb(a: Limb, b: Limb, borrow: bool) -> (Limb, bool) {
+		let (diff, borrow1) = a.val.overflowing_sub(b.val);
+		let (diff, borrow2) = diff.overflowing_sub(borrow as usize);
+		(Limb { val: diff }, borrow1 | borrow2)
+	}
+
+	// result = a * b + c + d
+	#[inline]
+	pub fn mul(a: Limb, b: Limb, c: Limb, d: Limb) -> [Limb; 2] {
+		const _: () =
+			assert!(std::mem::size_of::<u128>() >= 2 * std::mem::size_of::<Limb::Value>());
+		let a = a.val as u128;
+		let b = b.val as u128;
+		let c = c.val as u128;
+		let d = d.val as u128;
+		let t = a * b + c + d;
+		[
+			Limb {
+				val: t as Limb::Value, //
+			},
+			Limb {
+				val: (t >> Limb::BITS) as Limb::Value, //
+			},
+		]
+	}
 }
 
 #[inline]
@@ -23,6 +110,9 @@ fn has_no_overlap(a: *const Limb, a_len: usize, b: *const Limb, b_len: usize) ->
 	!has_overlap(a, a_len, b, b_len)
 }
 
+//--------------------------------------------------------------------------------------------------
+// bit_width
+
 /// Returns the number of bits needed to store the number.
 ///
 /// Preconditions:
@@ -36,10 +126,16 @@ pub unsafe fn bit_width_unchecked(a: *const Limb, n: usize) -> usize {
 	if n == 0 {
 		0
 	} else {
-		let hi = unsafe { a.offset(n as isize - 1).read().value };
-		n * Limb::BITS - (hi | 1).leading_zeros() as usize
+		unsafe {
+			n.unchecked_mul(Limb::BITS)
+				.unchecked_add(a.add(n - 1).read().bit_width())
+				.unchecked_sub(Limb::BITS)
+		}
 	}
 }
+
+//--------------------------------------------------------------------------------------------------
+// numcpy
 
 /// rp[i..<n] = ap[i..<n]
 ///
@@ -77,21 +173,40 @@ pub unsafe fn numcpy_unchecked(mut rp: *mut Limb, re: *mut Limb, mut ap: *const 
 }
 
 #[inline]
-pub unsafe fn negcpy_unchecked(rp: *mut Limb, ap: *const Limb, i: usize, n: usize) {
-	debug_assert!(i <= n);
-	debug_assert!(has_no_overlap(rp, n, ap, n));
+pub unsafe fn numcpy_unchecked_i_n(mut rp: *mut Limb, mut ap: *const Limb, i: usize, n: usize) {
 	unsafe {
-		for i in i..n {
-			rp.add(i).write(Limb { value: !ap.add(i).read().value });
+		let re = rp.add(n);
+		rp = rp.add(i);
+		ap = ap.add(i);
+		numcpy_unchecked(rp, re, ap);
+	}
+}
+
+#[inline]
+pub unsafe fn negcpy_unchecked(mut rp: *mut Limb, re: *mut Limb, mut ap: *const Limb) {
+	unsafe {
+		while rp != re {
+			rp.write(ap.read().bit_neg());
+			rp = rp.add(1);
+			ap = ap.add(1);
 		}
 	}
 }
 
+//--------------------------------------------------------------------------------------------------
+// trim
+
+#[inline]
 pub unsafe fn trim_unchecked(p: *const Limb, i: usize, mut n: usize) -> usize {
 	debug_assert!(i <= n);
 	unsafe {
-		while i != n && p.add(n.unchecked_sub(1)).read().value == 0 {
-			n = n.unchecked_sub(1);
+		if i != n {
+			while p.add(n.unchecked_sub(1)).read().is_zero() {
+				n = n.unchecked_sub(1);
+				if n == i {
+					break;
+				}
+			}
 		}
 		n
 	}
@@ -99,40 +214,25 @@ pub unsafe fn trim_unchecked(p: *const Limb, i: usize, mut n: usize) -> usize {
 
 /// This is like `trim_unchecked()`, but it assumes that the highest limb is probably non-zero and
 /// so it is unlikely that any actual trimming will be needed.
-#[inline(always)]
+#[inline]
 pub unsafe fn cold_trim_unchecked(p: *const Limb, i: usize, n: usize) -> usize {
 	debug_assert!(i <= n);
 	unsafe {
-		if i == n || p.add(n.unchecked_sub(1)).read().value != 0 {
-			n
-		} else {
-			cold_path();
-			trim_unchecked(p, i, n.unchecked_sub(1))
-		}
-	}
-}
-
-#[inline(always)]
-pub unsafe fn cold_trim_unchecked2(rp: *const Limb, mut re: *const Limb) -> *const Limb {
-	unsafe {
-		if rp == re || re.offset(-1).read().value != 0 {
-			re
-		} else {
-			cold_path();
-			while rp != re && re.offset(-1).read().value == 0 {
-				re = re.offset(-1);
+		if i != n {
+			if p.add(n.unchecked_sub(1)).read().is_not_zero() {
+				n
+			} else {
+				cold_path();
+				trim_unchecked(p, i, n.unchecked_sub(1))
 			}
-			re
+		} else {
+			n
 		}
 	}
 }
 
-#[inline]
-pub fn add3(a: Limb, b: Limb, carry: bool) -> (Limb, bool) {
-	let (sum, overflow1) = a.value.overflowing_add(b.value);
-	let (sum, overflow2) = sum.overflowing_add(carry as usize);
-	(Limb { value: sum }, overflow1 | overflow2)
-}
+//--------------------------------------------------------------------------------------------------
+// add
 
 pub unsafe fn add_n_unchecked(
 	rp: *mut Limb, ap: *const Limb, bp: *const Limb, i: usize, n: usize,
@@ -145,7 +245,7 @@ pub unsafe fn add_n_unchecked(
 
 		let mut carry = false;
 		while rp != re {
-			let (sum, overflow) = add3(ap.read(), bp.read(), carry);
+			let (sum, overflow) = Limb::addc(ap.read(), bp.read(), carry);
 			rp.write(sum);
 			carry = overflow;
 
@@ -168,65 +268,65 @@ pub unsafe fn add_carry_unchecked(
 		let mut ap = ap.add(i);
 
 		let mut carry = carry;
-		while rp != re {
-			if !carry {
-				numcpy_unchecked(rp, re, ap);
-				return false;
+		while carry {
+			if rp == re {
+				return true;
 			}
 
-			let (sum, overflow) = ap.read().value.overflowing_add(1);
-			rp.write(Limb { value: sum });
+			let (sum, overflow) = Limb::addc(ap.read(), Limb::zero(), carry);
+			rp.write(sum);
 			carry = overflow;
 
 			rp = rp.add(1);
 			ap = ap.add(1);
 		}
 
-		carry
+		numcpy_unchecked(rp, re, ap);
+		return false;
 	}
 }
 
 pub unsafe fn neg_add_carry_unchecked(
-	rp: *mut Limb, ap: *const Limb, mut carry: bool, i: usize, n: usize,
+	rp: *mut Limb, ap: *const Limb, carry: bool, i: usize, n: usize,
 ) -> bool {
 	debug_assert!(has_no_overlap(rp, n, ap, n));
 	unsafe {
-		let mut i = i;
+		let re = rp.add(n);
+		let mut rp = rp.add(i);
+		let mut ap = ap.add(i);
+
+		let mut carry = carry;
 		while carry {
-			if i == n {
+			if rp == re {
 				return true;
 			}
 
-			let a = !ap.add(i).read().value;
-			let s = a.wrapping_add(1);
-			rp.add(i).write(Limb { value: s });
-			carry = s == 0;
+			let (sum, overflow) = Limb::addc(ap.add(i).read().bit_neg(), Limb::zero(), carry);
+			rp.add(i).write(sum);
+			carry = overflow;
 
-			i = i.unchecked_add(1);
+			rp = rp.add(1);
+			ap = ap.add(1);
 		}
 
-		negcpy_unchecked(rp, ap, i, n);
+		negcpy_unchecked(rp, re, ap);
 		false
 	}
 }
 
-/*pub unsafe fn add_1_unchecked(rp: *mut Limb, ap: *const Limb, b: Limb, i: usize, n: usize) -> bool {
+pub unsafe fn add_1_unchecked(rp: *mut Limb, ap: *const Limb, b: Limb, i: usize, n: usize) -> bool {
 	debug_assert!(i < n);
 	debug_assert!(has_no_overlap(rp, n, ap, n));
 	unsafe {
 		let a = ap.add(i).read();
-		let (s, carry) = add3(a, b, false);
-		rp.add(i).write(s);
+		let (sum, carry) = Limb::addc(a, b, false);
+		rp.add(i).write(sum);
 		add_carry_unchecked(rp, ap, carry, i.unchecked_add(1), n)
 	}
-}*/
-
-#[inline]
-pub fn sub3(a: Limb, b: Limb, borrow: bool) -> (Limb, bool) {
-	let (diff, borrow1) = a.value.overflowing_sub(b.value);
-	let (diff, borrow2) = diff.overflowing_sub(borrow as usize);
-	(Limb { value: diff }, borrow1 | borrow2)
 }
+
+//--------------------------------------------------------------------------------------------------
+// sub
 
 pub unsafe fn sub_n_unchecked(
 	rp: *mut Limb, ap: *const Limb, bp: *const Limb, i: usize, n: usize,
@@ -241,7 +341,7 @@ pub unsafe fn sub_n_unchecked(
 
 		let mut borrow = false;
 		while rp != re {
-			let (diff, underflow) = sub3(ap.read(), bp.read(), borrow);
+			let (diff, underflow) = Limb::subb(ap.read(), bp.read(), borrow);
 			rp.write(diff);
 			borrow = underflow;
 
@@ -267,11 +367,11 @@ pub unsafe fn sub_borrow_unchecked(
 		while rp != re {
 			if !borrow {
 				numcpy_unchecked(rp, re, ap);
-				return false;
+				break;
 			}
 
-			let (diff, underflow) = ap.read().value.overflowing_sub(1);
-			rp.write(Limb { value: diff });
+			let (diff, underflow) = Limb::subb(ap.read(), Limb::zero(), borrow);
+			rp.write(diff);
 			borrow = underflow;
 
 			rp = rp.add(1);
@@ -287,11 +387,57 @@ pub unsafe fn sub_1_unchecked(rp: *mut Limb, ap: *const Limb, b: Limb, i: usize,
 	debug_assert!(has_no_overlap(rp, n, ap, n));
 	unsafe {
 		let a = ap.add(i).read();
-		let (d, borrow) = sub3(a, b, false);
+		let (d, borrow) = Limb::subb(a, b, false);
 		rp.add(i).write(d);
-		sub_borrow_unchecked(rp, ap, borrow, i + 1, n)
+		sub_borrow_unchecked(rp, ap, borrow, i.unchecked_add(1), n)
 	}
 }
+
+//--------------------------------------------------------------------------------------------------
+// mul
+
+/// Preconditions:
+/// - n > 0
+/// - a.len() > 0
+#[inline(never)]
+pub unsafe fn mul_1_unchecked(rp: *mut Limb, re: *mut Limb, ap: *const Limb, b: Limb) -> Limb {
+	unsafe {
+		let mut rp = rp;
+		let mut ap = ap;
+
+		let mut carry = Limb::zero();
+		while rp != re {
+			let [lo, hi] = Limb::mul(ap.read(), b, carry, Limb::zero());
+			rp.write(lo);
+			carry = hi;
+
+			rp = rp.add(1);
+			ap = ap.add(1);
+		}
+		carry
+	}
+}
+
+#[inline(never)]
+pub unsafe fn addmul_1_unchecked(rp: *mut Limb, re: *mut Limb, ap: *const Limb, b: Limb) -> Limb {
+	unsafe {
+		let mut rp = rp;
+		let mut ap = ap;
+
+		let mut carry = Limb::zero();
+		while rp != re {
+			let [lo, hi] = Limb::mul(ap.read(), b, carry, rp.read());
+			rp.write(lo);
+			carry = hi;
+
+			rp = rp.add(1);
+			ap = ap.add(1);
+		}
+		carry
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -324,28 +470,28 @@ mod tests {
 		unsafe {
 			let a = testvec![15, 17, 19, 21, 23, 25, 27, 29, 31, 33];
 			let mut r = testvec![0, 0, 0];
-			numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 1, 2);
+			numcpy_unchecked_i_n(r.as_mut_ptr(), a.as_ptr(), 1, 2);
 			assert_eq!(r, testvec![0, 17, 0]);
 
 			let mut r = testvec![1, 2, 3];
-			numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 0, 2);
+			numcpy_unchecked_i_n(r.as_mut_ptr(), a.as_ptr(), 0, 2);
 			assert_eq!(r, testvec![15, 17, 3]);
 
 			let mut r = testvec![1, 2, 3, 4, 5, 6, 7, 8];
-			numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 0, 3);
+			numcpy_unchecked_i_n(r.as_mut_ptr(), a.as_ptr(), 0, 3);
 			assert_eq!(r, testvec![15, 17, 19, 4, 5, 6, 7, 8]);
 
 			let mut r = testvec![1, 2, 3, 4, 5, 6, 7, 18];
-			numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 0, 4);
+			numcpy_unchecked_i_n(r.as_mut_ptr(), a.as_ptr(), 0, 4);
 			assert_eq!(r, testvec![15, 17, 19, 21, 5, 6, 7, 18]);
 
 			let mut r = testvec![1, 2, 3, 4, 5, 6, 227, 18];
-			numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 0, 5);
+			numcpy_unchecked_i_n(r.as_mut_ptr(), a.as_ptr(), 0, 5);
 			assert_eq!(r, testvec![15, 17, 19, 21, 23, 6, 227, 18]);
 
 			let a = testvec![115, 17, 119, 21, 123, 25, 127, 29, 131, 33];
 			let mut r = testvec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
-			numcpy_unchecked(r.as_mut_ptr(), a.as_ptr(), 2, 10);
+			numcpy_unchecked_i_n(r.as_mut_ptr(), a.as_ptr(), 2, 10);
 			assert_eq!(r, testvec![1, 2, 119, 21, 123, 25, 127, 29, 131, 33, 11, 12, 13]);
 		}
 	}
@@ -398,44 +544,38 @@ mod tests {
 			let b = testvec![TWO_THIRDS, 1, 2, 3, HALF, MAX, 0];
 			let mut r = testvec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 			let carry = add_n_unchecked(r.as_mut_ptr(), a.as_ptr(), b.as_ptr(), 0, 7);
-			assert_eq!(
-				r,
-				testvec![
-					TWO_THIRDS - (Limb::MAX - HALF + 1),
-					3,
-					4,
-					6,
-					TWO_THIRDS - (Limb::MAX - HALF + 1),
-					MAX,
-					0,
-					7,
-					8,
-					9,
-					10
-				]
-			);
+			assert_eq!(r, testvec![
+				TWO_THIRDS - (Limb::MAX - HALF + 1),
+				3,
+				4,
+				6,
+				TWO_THIRDS - (Limb::MAX - HALF + 1),
+				MAX,
+				0,
+				7,
+				8,
+				9,
+				10
+			]);
 			assert_eq!(carry, true);
 
 			let a = testvec![HALF, 1, 2, 3, TWO_THIRDS, MAX, TWO_THIRDS];
 			let b = testvec![TWO_THIRDS, 1, 2, 3, HALF, MAX, 0];
 			let mut r = testvec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 			let carry = add_n_unchecked(r.as_mut_ptr(), a.as_ptr(), b.as_ptr(), 0, 7);
-			assert_eq!(
-				r,
-				testvec![
-					TWO_THIRDS - (Limb::MAX - HALF + 1),
-					3,
-					4,
-					6,
-					TWO_THIRDS - (Limb::MAX - HALF + 1),
-					MAX,
-					TWO_THIRDS + 1,
-					7,
-					8,
-					9,
-					10
-				]
-			);
+			assert_eq!(r, testvec![
+				TWO_THIRDS - (Limb::MAX - HALF + 1),
+				3,
+				4,
+				6,
+				TWO_THIRDS - (Limb::MAX - HALF + 1),
+				MAX,
+				TWO_THIRDS + 1,
+				7,
+				8,
+				9,
+				10
+			]);
 			assert_eq!(carry, false);
 		}
 	}
@@ -506,10 +646,19 @@ mod tests {
 			let a = testvec![TWO_THIRDS, 1, 2, 3, TWO_THIRDS, MAX, MAX];
 			let mut r = testvec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 			let carry = add_1_unchecked(r.as_mut_ptr(), a.as_ptr(), Limb { value: HALF }, 0, 7);
-			assert_eq!(
-				r,
-				testvec![TWO_THIRDS - (MAX - HALF) - 1, 2, 2, 3, TWO_THIRDS, MAX, MAX, 7, 8, 9, 10]
-			);
+			assert_eq!(r, testvec![
+				TWO_THIRDS - (MAX - HALF) - 1,
+				2,
+				2,
+				3,
+				TWO_THIRDS,
+				MAX,
+				MAX,
+				7,
+				8,
+				9,
+				10
+			]);
 			assert_eq!(carry, false);
 
 			let a = testvec![TWO_THIRDS, MAX, MAX, MAX, MAX, MAX, MAX];

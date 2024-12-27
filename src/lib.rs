@@ -32,8 +32,8 @@ pub mod ll;
 pub mod tagged_ptr;
 
 //use buf::{Buffer, InlineBuffer};
-use error::{assert, Error, ErrorKind};
-use ll::{numcpy_est, Limb};
+use error::{Error, ErrorKind, assert};
+use ll::{Limb, numcpy_est};
 use tagged_ptr::TaggedPtr;
 
 #[macro_export]
@@ -112,7 +112,7 @@ impl Drop for OwnedBuffer {
 		unsafe {
 			let ptr = self.ptr.offset(-1);
 			let cap = self.cap.get();
-			debug_assert!(cap == ptr.read().value);
+			debug_assert!(cap == ptr.read().val);
 
 			let size = (cap + 1) * std::mem::size_of::<ll::Limb>();
 			let align = std::mem::align_of::<ll::Limb>();
@@ -167,7 +167,7 @@ pub struct Int {
 
 impl Int {
 	pub fn new_zero() -> Self {
-		Self::new_inline(ll::Limb { value: 0 }, false)
+		Self::new_inline(ll::Limb::zero(), false)
 	}
 
 	pub fn new_inline(value: ll::Limb, neg: bool) -> Self {
@@ -189,7 +189,7 @@ impl Int {
 			let buf = ManuallyDrop::new(buf);
 			Ok(Self {
 				vec: TaggedPtr::new(buf.ptr, neg),
-				magn: ll::Limb { value: len },
+				magn: ll::Limb { val: len },
 			})
 		} else {
 			cold_path();
@@ -212,7 +212,7 @@ impl Int {
 
 	pub fn is_zero(&self) -> bool {
 		// Note that this works for both small and large numbers.
-		self.magn.value == 0
+		self.magn.is_zero()
 	}
 
 	pub fn is_positive(&self) -> bool {
@@ -232,7 +232,7 @@ impl Int {
 
 	fn __buf_view<'a>(&'a self) -> BufView<'a> {
 		if let Some(large) = self.vec.ptr() {
-			let cap = unsafe { large.offset(-1).read().value };
+			let cap = unsafe { large.offset(-1).read().val };
 			debug_assert!(cap > 0);
 			let cap = unsafe { NonZeroUsize::new_unchecked(cap) };
 			BufView {
@@ -289,7 +289,7 @@ impl Int {
 		let cap = if likely(cap <= Self::MAX_LIMBS) { cap } else { Self::MAX_LIMBS };
 		let cap = unsafe { NonZeroUsize::new_unchecked(cap) };
 
-		unsafe { ptr.write(ll::Limb { value: cap.get() }) };
+		unsafe { ptr.write(ll::Limb { val: cap.get() }) };
 		let ptr = unsafe { ptr.offset(1) };
 
 		Ok(OwnedBuffer { ptr, cap })
@@ -308,7 +308,7 @@ impl Int {
 				kind: ViewKind::Large,
 				neg: self.is_negative(),
 				limbs: large,
-				len: self.magn.value,
+				len: self.magn.val,
 				phantom: std::marker::PhantomData,
 			}
 		} else {
@@ -316,7 +316,7 @@ impl Int {
 				kind: ViewKind::Small,
 				neg: self.is_negative(),
 				limbs: NonNull::from(&self.magn),
-				len: (self.magn.value != 0) as usize,
+				len: self.magn.is_not_zero() as usize,
 				phantom: std::marker::PhantomData,
 			}
 		}
@@ -403,16 +403,16 @@ impl Int {
 		let b = b.view();
 		if sub {
 			let mut r = Self::alloc_buf(ll::sub_est(&a, &b))?;
-			let (neg, len) = ll::sub(&mut r, &a, &b);
+			let (neg, len) = ll::sub(&mut r, &a, &b)?;
 			if len > Self::ONE_LIMB {
 				Self::new_with_buf(r, len, a.neg ^ neg)
 			} else {
-				let value = if len == 0 { 0 } else { r[0].value };
-				Ok(Self::new_inline(Limb { value }, a.neg ^ neg))
+				let val = if len == 0 { 0 } else { r[0].val };
+				Ok(Self::new_inline(Limb { val }, a.neg ^ neg))
 			}
 		} else {
 			let mut r = Self::alloc_buf(ll::add_est(&a, &b))?;
-			let len = ll::add(&mut r, &a, &b);
+			let len = ll::add(&mut r, &a, &b)?;
 			Self::new_with_buf(r, len, a.neg)
 		}
 	}
@@ -437,6 +437,14 @@ impl Int {
 
 	pub fn sub(a: &Int, b: &Int) -> Int {
 		Self::try_add_or_sub(a, true, b).unwrap()
+	}
+
+	pub fn try_mul(a: &Int, b: &Int) -> Result<Int, Error> {
+		let a = a.view();
+		let b = b.view();
+		let mut r = Self::alloc_buf(ll::mul_est(&a, &b))?;
+		let len = ll::mul(&mut r, &a, &b, &std::alloc::Global::default())?;
+		Self::new_with_buf(r, len, a.neg ^ b.neg)
 	}
 }
 

@@ -1,12 +1,11 @@
-use crate::blocks;
-use crate::Limb;
+use crate::{Limb, blocks};
 
 #[inline(always)]
 pub fn add<const N: usize>(a: &[Limb; N], b: &[Limb; N]) -> ([Limb; N], bool) {
-	let mut r: [Limb; N] = [Limb { value: 0 }; N];
+	let mut r: [Limb; N] = [Limb::default(); N];
 	let mut carry = false;
 	for i in 0..N {
-		(r[i], carry) = blocks::add3(a[i], b[i], carry);
+		(r[i], carry) = Limb::addc(a[i], b[i], carry);
 	}
 	(r, carry)
 }
@@ -22,10 +21,10 @@ pub fn sub<const N: usize>(a: &[Limb; N], b: &[Limb; N]) -> ([Limb; N], bool) {
 	}
 	let (a, b) = if swapped { (b, a) } else { (a, b) };
 
-	let mut r: [Limb; N] = [Limb { value: 0 }; N];
+	let mut r: [Limb; N] = [Limb::default(); N];
 	let mut borrow = false;
 	for i in 0..N {
-		(r[i], borrow) = blocks::sub3(a[i], b[i], borrow);
+		(r[i], borrow) = Limb::subb(a[i], b[i], borrow);
 	}
 	debug_assert!(!borrow);
 	(r, swapped)

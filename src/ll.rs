@@ -30,7 +30,7 @@ use std::num::NonZeroUsize;
 
 use crate::blocks;
 pub use crate::blocks::Limb;
-use crate::error::{assert, Error, ErrorKind};
+use crate::error::{Error, ErrorKind, assert};
 
 //--------------------------------------------------------------------------------------------------
 // bit_width
@@ -67,8 +67,7 @@ pub fn numcpy(r: &mut [Limb], a: &[Limb]) -> usize {
 	}
 
 	unsafe {
-		let re = rp.add(n);
-		blocks::numcpy_unchecked(rp, re, ap);
+		blocks::numcpy_unchecked_i_n(rp, ap, 0, n);
 		blocks::cold_trim_unchecked(rp, 0, n)
 	}
 }
@@ -82,14 +81,25 @@ pub fn add_est(a: &[Limb], b: &[Limb]) -> usize {
 }
 
 #[inline]
-pub fn add(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> usize {
-	let len = __add(r, a, b);
+pub fn add(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> Result<usize, Error> {
+	if r.len() <= a.len().max(b.len()) {
+		cold_path();
+		return Err(Error::new_buffer_too_small("add"));
+	}
+	let len = __add_trunc(r, a, b);
+	unsafe { assume(len <= r.len()) };
+	Ok(len)
+}
+
+#[inline]
+pub fn add_trunc(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> usize {
+	let len = __add_trunc(r, a, b);
 	unsafe { assume(len <= r.len()) };
 	len
 }
 
 #[inline(never)]
-fn __add(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> usize {
+fn __add_trunc(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> usize {
 	// Ensure that `a` is not shorter than `b`
 	let (a, b) = if a.len() >= b.len() { (a, b) } else { (b, a) };
 
@@ -99,9 +109,8 @@ fn __add(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> usize {
 		let bp = b.as_ptr();
 
 		let rn = r.len();
-
 		let (an, bn) = //.
-			if rn > a.len() {
+			if rn >= a.len() {
 				(a.len(), b.len())
 			} else {
 				cold_path();
@@ -109,20 +118,26 @@ fn __add(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> usize {
 			};
 
 		if an == 0 {
+			// We're adding `0 + 0`
+			cold_path();
 			return 0;
 		}
 
 		let carry = blocks::add_n_unchecked(rp, ap, bp, 0, bn);
 		let carry = blocks::add_carry_unchecked(rp, ap, carry, bn, an);
 
-		let len = //.
-			if an != rn {
-				rp.add(an).write(Limb { value: carry as Limb::Value });
-				an.unchecked_add(carry as usize)
+		let len;
+		if carry {
+			if rn > an {
+				rp.add(an).write(Limb::one());
+				return an.unchecked_add(1);
 			} else {
 				cold_path();
-				an
-			};
+				len = an;
+			}
+		} else {
+			len = an;
+		};
 		blocks::cold_trim_unchecked(rp, 0, len)
 	}
 }
@@ -135,10 +150,21 @@ pub fn sub_est(a: &[Limb], b: &[Limb]) -> usize {
 	a.len().max(b.len())
 }
 
+#[inline]
+pub fn sub(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> Result<(bool, usize), Error> {
+	if r.len() < a.len().max(b.len()) {
+		cold_path();
+		return Err(Error::new_buffer_too_small("sub"));
+	}
+	let (neg, len) = __sub_trunc(r, a, b);
+	unsafe { assume(len <= r.len()) };
+	Ok((neg, len))
+}
+
 /// Subtracts `A - B` and returns length of the result and whether the result is negative.
 #[inline]
-pub fn sub(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> (bool, usize) {
-	let (neg, len) = __sub(r, a, b);
+pub fn sub_trunc(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> (bool, usize) {
+	let (neg, len) = __sub_trunc(r, a, b);
 	unsafe { assume(len <= r.len()) };
 	(neg, len)
 }
@@ -166,7 +192,7 @@ fn __prep_sub<'a>(a: &'a [Limb], b: &'a [Limb]) -> (bool, &'a [Limb], &'a [Limb]
 			assume(a.len() > b.len());
 			assume(a.len() > 0);
 
-			if a.get_unchecked(a.len() - 1).value != 0 {
+			if a.get_unchecked(a.len() - 1).is_not_zero() {
 				// The highest limb of A is non-zero. We're done.
 				return (swapped, a, b);
 			} else {
@@ -201,32 +227,103 @@ fn __prep_sub<'a>(a: &'a [Limb], b: &'a [Limb]) -> (bool, &'a [Limb], &'a [Limb]
 }
 
 #[inline(never)]
-fn __sub(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> (bool, usize) {
+fn __sub_trunc(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> (bool, usize) {
 	// Ensure that `a` is not smaller than `b`
 	let (swapped, a, b) = __prep_sub(a, b);
 
-	let (rp, rn) = (r.as_mut_ptr(), r.len());
-	let (ap, an) = (a.as_ptr(), a.len().min(rn));
-	let (bp, bn) = (b.as_ptr(), b.len().min(rn));
-
-	if an == 0 {
-		return (false, 0);
-	}
-
 	unsafe {
+		let rp = r.as_mut_ptr();
+		let ap = a.as_ptr();
+		let bp = b.as_ptr();
+
+		let rn = r.len();
+		let (an, bn) = //.
+			if rn >= a.len() {
+				(a.len(), b.len())
+			} else {
+				cold_path();
+				(rn, b.len().min(rn))
+			};
+
+		if an == 0 {
+			// We're subtracting `0 - 0`
+			cold_path();
+			return (false, 0);
+		}
+
 		let borrow = blocks::sub_n_unchecked(rp, ap, bp, 0, bn);
 		let _borrow = blocks::sub_borrow_unchecked(rp, ap, borrow, bn, an);
 
-		// trim leading zeros
-		let mut an = an;
-		while rp.add(an.unchecked_sub(1)).read().value == 0 {
-			an = an.unchecked_sub(1);
-			if an == 0 {
-				break;
-			}
+		(swapped, blocks::trim_unchecked(rp, 0, an))
+	}
+}
+
+//--------------------------------------------------------------------------------------------------
+// mul
+
+pub fn mul_est(a: &[Limb], b: &[Limb]) -> usize {
+	if a.is_empty() || b.is_empty() {
+		0 //
+	} else {
+		unsafe { a.len().unchecked_add(b.len()) }
+	}
+}
+
+pub fn mul(
+	r: &mut [Limb], a: &[Limb], b: &[Limb], scratch_alloc: &dyn std::alloc::Allocator,
+) -> Result<usize, Error> {
+	if a.is_empty() || b.is_empty() {
+		return Ok(0);
+	}
+	if r.len() < unsafe { a.len().unchecked_add(b.len()) } {
+		cold_path();
+		return Err(Error::new_buffer_too_small("mul"));
+	}
+	unsafe {
+		let len = __mul(r, a, b, scratch_alloc);
+		assume(len <= r.len());
+		Ok(len)
+	}
+}
+
+#[inline(never)]
+unsafe fn __mul(
+	r: &mut [Limb], a: &[Limb], b: &[Limb], _scratch_alloc: &dyn std::alloc::Allocator,
+) -> usize {
+	debug_assert!(!r.is_empty());
+	debug_assert!(!a.is_empty());
+	debug_assert!(!b.is_empty());
+	debug_assert!(a.len() >= b.len());
+	unsafe {
+		// Ensure that `a` is not smaller than `b`
+		let (a, b) = if a.len() >= b.len() { (a, b) } else { (b, a) };
+
+		let mut rp = r.as_mut_ptr();
+		let ap = a.as_ptr();
+		let mut bp = b.as_ptr();
+
+		let mut re = rp.add(a.len());
+		let be = bp.add(b.len());
+
+		let mut t = blocks::mul_1_unchecked(rp, re, ap, bp.read());
+		re.write(t);
+
+		rp = rp.add(1);
+		re = re.add(1);
+		bp = bp.add(1);
+
+		while bp != be {
+			t = blocks::addmul_1_unchecked(rp, re, ap, bp.read());
+			re.write(t);
+
+			rp = rp.add(1);
+			re = re.add(1);
+			bp = bp.add(1);
 		}
 
-		(swapped, an)
+		let len = a.len().unchecked_add(b.len()).unchecked_sub(t.is_zero() as usize);
+
+		blocks::cold_trim_unchecked(rp, 0, len)
 	}
 }
 
