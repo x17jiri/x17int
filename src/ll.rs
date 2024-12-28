@@ -333,10 +333,7 @@ unsafe fn __mul(
 
 #[inline]
 pub fn str_to_int_est(ndigits: usize, base: usize) -> Option<usize> {
-	Some(match BaseInfo::get(base)? {
-		BaseInfo::Pow2(b) => b.digits_to_limbs(ndigits),
-		BaseInfo::Other(b) => b.digits_to_limbs(ndigits),
-	})
+	Some(BaseInfo::get(base)?.digits_to_limbs(ndigits))
 }
 
 //pub fn str_to_int(r: &mut [Limb], digits: &[u8], base: u8) -> Result<usize, Error> {

@@ -1,5 +1,7 @@
-use crate::base_info_gen;
 use crate::blocks::Limb;
+use crate::Error;
+use crate::{base_info_gen, blocks};
+use std::intrinsics::{assume, cold_path};
 
 #[derive(Copy, Clone, Debug)]
 pub struct BaseInfo {
@@ -12,6 +14,19 @@ pub struct BaseInfo {
 }
 
 impl BaseInfo {
+	/// min_base() ..= max_base() are valid base values.
+	pub const fn min_base() -> usize {
+		2
+	}
+
+	/// min_base() ..= max_base() are valid base values.
+	pub const fn max_base() -> usize {
+		base_info_gen::BASE_INFO.len() + 1
+	}
+
+	/// Returns the base info for the given base.
+	///
+	/// min_base() ..= max_base() are valid base values.
 	#[inline]
 	pub fn get(base: usize) -> Option<&'static BaseInfo> {
 		if base < 2 {
@@ -20,46 +35,16 @@ impl BaseInfo {
 		let value = base_info_gen::BASE_INFO.get(base - 2);
 
 		if let Some(value) = value {
-			debug_assert!(
-				base == match value {
-					BaseInfo::Pow2(BaseInfoPow2 { base, .. }) => *base as usize,
-					BaseInfo::Other(BaseInfoOther { base, .. }) => *base as usize,
-				}
-			);
+			debug_assert!(value.base as usize == base);
 		}
 
 		value
 	}
-}
 
-impl BaseInfoPow2 {
-	#[inline]
-	pub fn digits_to_limbs(&self, digits: usize) -> usize {
-		const LIMB_BITS: Limb::DoubleValue = Limb::BITS as Limb::DoubleValue;
-		let digits = digits as Limb::DoubleValue;
-		let bits_per_digit = self.bits_per_digit as Limb::DoubleValue;
-		((
-			// number of bits
-			digits * bits_per_digit
-
-			// round up to whole limbs
-			+ (LIMB_BITS - 1)
-		) / LIMB_BITS) as usize
-	}
-
-	pub fn parse_digits(&self, digits: &[u8]) -> Limb {
-		debug_assert!(digits.len() <= self.digits_per_limb as usize);
-		let mut val = 0;
-		for &digit in digits {
-			val <<= self.bits_per_digit as usize;
-			val |= digit as Limb::Value;
-		}
-		Limb { val }
-	}
-}
-
-impl BaseInfoOther {
-	#[inline]
+	/// Calculates how many limbs are needed to store given number of digits.
+	///
+	/// The result may be overestimated, but it is guaranteed to be enough.
+	#[inline(never)]
 	pub fn digits_to_limbs(&self, digits: usize) -> usize {
 		const LIMB_BITS: Limb::DoubleValue = Limb::BITS as Limb::DoubleValue;
 		let digits = digits as Limb::DoubleValue;
@@ -76,13 +61,51 @@ impl BaseInfoOther {
 		) / (65536 * LIMB_BITS)) as usize
 	}
 
-	pub fn parse_digits(&self, digits: &[u8]) -> Limb {
-		debug_assert!(digits.len() <= self.digits_per_limb as usize);
-		let mut val = 0;
-		for &digit in digits {
-			val *= self.base as Limb::Value;
-			val += digit as Limb::Value;
+	#[inline(never)]
+	pub fn parse_segment(&self, segment: &[u8]) -> Limb {
+		let base = self.base as Limb::Value;
+		let mut val: Limb::Value = 0;
+		for digit in segment {
+			val = val * base + (*digit as Limb::Value);
 		}
 		Limb { val }
+	}
+
+	#[inline(never)]
+	pub fn parse_digits(&self, r: &mut [Limb], digits: &[u8]) -> usize {
+		if digits.is_empty() || r.is_empty() {
+			return 0;
+		}
+
+		let big_base = self.big_base;
+		let digits_per_limb = self.digits_per_limb as usize;
+		unsafe { assume(digits_per_limb != 0) };
+		//-- Parse the top limb.
+
+		let segments =
+			(((digits.len() as u128) * (self.digits_per_limb_inv as u128)) >> usize::BITS) as usize;
+		let top_len = digits.len().wrapping_sub(unsafe { segments.unchecked_mul(digits_per_limb) });
+
+		let top_len =
+			if top_len < digits_per_limb { top_len } else { digits.len() % digits_per_limb };
+		let top = self.parse_segment(unsafe { digits.get_unchecked(..top_len) });
+		r[0] = top;
+		let mut len = top.is_not_zero() as usize;
+
+		//-- Parse the rest
+
+		let rp = r.as_mut_ptr();
+		for i in (top_len..digits.len()).step_by(digits_per_limb) {
+			let new_bottom =
+				self.parse_segment(unsafe { digits.get_unchecked(i..i + digits_per_limb) });
+			let new_top = unsafe { blocks::mul_1_unchecked_(rp, rp.add(len), big_base) };
+			r[0].val += new_bottom.val;
+			if new_top.is_not_zero() && len < r.len() {
+				r[len] = new_top;
+				len += 1;
+			}
+		}
+
+		len
 	}
 }
