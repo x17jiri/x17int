@@ -24,6 +24,8 @@ use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 use std::result;
 
+pub mod base_info;
+pub mod base_info_gen;
 pub mod blocks;
 pub mod buf;
 pub mod error;
@@ -32,8 +34,8 @@ pub mod ll;
 pub mod tagged_ptr;
 
 //use buf::{Buffer, InlineBuffer};
-use error::{Error, ErrorKind, assert};
-use ll::{Limb, numcpy_est};
+use error::{assert, Error, ErrorKind};
+use ll::{numcpy_est, Limb};
 use tagged_ptr::TaggedPtr;
 
 #[macro_export]
@@ -440,6 +442,10 @@ impl Int {
 	}
 
 	pub fn try_mul(a: &Int, b: &Int) -> Result<Int, Error> {
+		if a.is_zero() || b.is_zero() {
+			return Ok(Self::new_zero());
+		}
+
 		let a = a.view();
 		let b = b.view();
 		let mut r = Self::alloc_buf(ll::mul_est(&a, &b))?;

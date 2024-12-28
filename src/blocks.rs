@@ -10,43 +10,48 @@ impl Limb {
 	pub const BITS: usize = usize::BITS as usize;
 	pub const MAX: Self::Value = usize::MAX;
 
+	pub type DoubleValue = u128;
+	const OK: () =
+		assert!(std::mem::size_of::<Self::DoubleValue>() >= 2 * std::mem::size_of::<Self::Value>());
+
 	#[inline]
-	pub fn zero() -> Self {
+	pub const fn zero() -> Self {
 		Self { val: 0 }
 	}
 
 	#[inline]
-	pub fn one() -> Self {
+	pub const fn one() -> Self {
 		Self { val: 1 }
 	}
 
 	#[inline]
-	pub fn new(val: usize) -> Self {
+	pub const fn new(val: usize) -> Self {
+		let _ = Self::OK;
 		Self { val }
 	}
 
 	#[inline]
-	pub fn is_zero(&self) -> bool {
+	pub const fn is_zero(&self) -> bool {
 		self.val == 0
 	}
 
 	#[inline]
-	pub fn is_not_zero(&self) -> bool {
+	pub const fn is_not_zero(&self) -> bool {
 		self.val != 0
 	}
 
 	#[inline]
-	pub fn bit_width(self) -> usize {
+	pub const fn bit_width(self) -> usize {
 		unsafe { Self::BITS.unchecked_sub((self.val | 1).leading_zeros() as usize) }
 	}
 
 	#[inline]
-	pub fn bit_neg(self) -> Self {
+	pub const fn bit_neg(self) -> Self {
 		Self { val: !self.val }
 	}
 
 	#[inline]
-	pub fn addc(a: Limb, b: Limb, c: bool) -> (Limb, bool) {
+	pub const fn addc(a: Limb, b: Limb, c: bool) -> (Limb, bool) {
 		let (sum, overflow1) = a.val.overflowing_add(b.val);
 		let (sum, overflow2) = sum.overflowing_add(c as usize);
 		(Limb { val: sum }, overflow1 | overflow2)
@@ -54,11 +59,9 @@ impl Limb {
 
 	#[inline]
 	pub fn sum<const N: usize>(a: [Limb; N]) -> [Limb; 2] {
-		const _: () =
-			assert!(std::mem::size_of::<u128>() >= 2 * std::mem::size_of::<Limb::Value>());
-		let mut t: u128 = a[0].val as u128;
+		let mut t = a[0].val as Limb::DoubleValue;
 		for i in 1..N {
-			t += a[i].val as u128;
+			t += a[i].val as Limb::DoubleValue;
 		}
 		[
 			Limb {
@@ -71,7 +74,7 @@ impl Limb {
 	}
 
 	#[inline]
-	pub fn subb(a: Limb, b: Limb, borrow: bool) -> (Limb, bool) {
+	pub const fn subb(a: Limb, b: Limb, borrow: bool) -> (Limb, bool) {
 		let (diff, borrow1) = a.val.overflowing_sub(b.val);
 		let (diff, borrow2) = diff.overflowing_sub(borrow as usize);
 		(Limb { val: diff }, borrow1 | borrow2)
@@ -79,13 +82,11 @@ impl Limb {
 
 	// result = a * b + c + d
 	#[inline]
-	pub fn mul(a: Limb, b: Limb, c: Limb, d: Limb) -> [Limb; 2] {
-		const _: () =
-			assert!(std::mem::size_of::<u128>() >= 2 * std::mem::size_of::<Limb::Value>());
-		let a = a.val as u128;
-		let b = b.val as u128;
-		let c = c.val as u128;
-		let d = d.val as u128;
+	pub const fn mul(a: Limb, b: Limb, c: Limb, d: Limb) -> [Limb; 2] {
+		let a = a.val as Limb::DoubleValue;
+		let b = b.val as Limb::DoubleValue;
+		let c = c.val as Limb::DoubleValue;
+		let d = d.val as Limb::DoubleValue;
 		let t = a * b + c + d;
 		[
 			Limb {
@@ -418,6 +419,24 @@ pub unsafe fn mul_1_unchecked(rp: *mut Limb, re: *mut Limb, ap: *const Limb, b: 
 	}
 }
 
+/// In-place version of `mul_1_unchecked()`.
+#[inline(never)]
+pub unsafe fn mul_1_unchecked_(rp: *mut Limb, re: *mut Limb, b: Limb) -> Limb {
+	unsafe {
+		let mut rp = rp;
+
+		let mut carry = Limb::zero();
+		while rp != re {
+			let [lo, hi] = Limb::mul(rp.read(), b, carry, Limb::zero());
+			rp.write(lo);
+			carry = hi;
+
+			rp = rp.add(1);
+		}
+		carry
+	}
+}
+
 #[inline(never)]
 pub unsafe fn addmul_1_unchecked(rp: *mut Limb, re: *mut Limb, ap: *const Limb, b: Limb) -> Limb {
 	unsafe {
@@ -544,38 +563,44 @@ mod tests {
 			let b = testvec![TWO_THIRDS, 1, 2, 3, HALF, MAX, 0];
 			let mut r = testvec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 			let carry = add_n_unchecked(r.as_mut_ptr(), a.as_ptr(), b.as_ptr(), 0, 7);
-			assert_eq!(r, testvec![
-				TWO_THIRDS - (Limb::MAX - HALF + 1),
-				3,
-				4,
-				6,
-				TWO_THIRDS - (Limb::MAX - HALF + 1),
-				MAX,
-				0,
-				7,
-				8,
-				9,
-				10
-			]);
+			assert_eq!(
+				r,
+				testvec![
+					TWO_THIRDS - (Limb::MAX - HALF + 1),
+					3,
+					4,
+					6,
+					TWO_THIRDS - (Limb::MAX - HALF + 1),
+					MAX,
+					0,
+					7,
+					8,
+					9,
+					10
+				]
+			);
 			assert_eq!(carry, true);
 
 			let a = testvec![HALF, 1, 2, 3, TWO_THIRDS, MAX, TWO_THIRDS];
 			let b = testvec![TWO_THIRDS, 1, 2, 3, HALF, MAX, 0];
 			let mut r = testvec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 			let carry = add_n_unchecked(r.as_mut_ptr(), a.as_ptr(), b.as_ptr(), 0, 7);
-			assert_eq!(r, testvec![
-				TWO_THIRDS - (Limb::MAX - HALF + 1),
-				3,
-				4,
-				6,
-				TWO_THIRDS - (Limb::MAX - HALF + 1),
-				MAX,
-				TWO_THIRDS + 1,
-				7,
-				8,
-				9,
-				10
-			]);
+			assert_eq!(
+				r,
+				testvec![
+					TWO_THIRDS - (Limb::MAX - HALF + 1),
+					3,
+					4,
+					6,
+					TWO_THIRDS - (Limb::MAX - HALF + 1),
+					MAX,
+					TWO_THIRDS + 1,
+					7,
+					8,
+					9,
+					10
+				]
+			);
 			assert_eq!(carry, false);
 		}
 	}
@@ -646,19 +671,10 @@ mod tests {
 			let a = testvec![TWO_THIRDS, 1, 2, 3, TWO_THIRDS, MAX, MAX];
 			let mut r = testvec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 			let carry = add_1_unchecked(r.as_mut_ptr(), a.as_ptr(), Limb { value: HALF }, 0, 7);
-			assert_eq!(r, testvec![
-				TWO_THIRDS - (MAX - HALF) - 1,
-				2,
-				2,
-				3,
-				TWO_THIRDS,
-				MAX,
-				MAX,
-				7,
-				8,
-				9,
-				10
-			]);
+			assert_eq!(
+				r,
+				testvec![TWO_THIRDS - (MAX - HALF) - 1, 2, 2, 3, TWO_THIRDS, MAX, MAX, 7, 8, 9, 10]
+			);
 			assert_eq!(carry, false);
 
 			let a = testvec![TWO_THIRDS, MAX, MAX, MAX, MAX, MAX, MAX];
