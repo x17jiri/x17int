@@ -1,7 +1,9 @@
+use crate::base_info_gen::BASE_INFO;
 use crate::blocks::Limb;
 use crate::Error;
 use crate::{base_info_gen, blocks};
 use core::num::NonZeroU8;
+use std::fmt::DebugList;
 use std::intrinsics::{assume, cold_path};
 
 #[derive(Copy, Clone, Debug)]
@@ -10,6 +12,7 @@ pub struct BaseInfo {
 	pub bits_per_digit_ceil: usize,  // ceil(log2(base) * 65536)
 	pub bits_per_digit_floor: usize, // floor(log2(base) * 65536)
 	pub multiples: &'static [Limb],
+	pub parse_segment: fn(input: &[u8], i: usize) -> (Limb, usize),
 }
 
 impl BaseInfo {
@@ -28,22 +31,19 @@ impl BaseInfo {
 	/// min_base() ..= max_base() are valid base values.
 	#[inline]
 	pub fn get(base: usize) -> Option<&'static BaseInfo> {
-		if base < 2 {
-			return None;
-		}
-		let value = base_info_gen::BASE_INFO.get(base - 2);
-
-		if let Some(value) = value {
+		if let Some(value) = base_info_gen::BASE_INFO.get(base.wrapping_sub(2)) {
 			debug_assert!(value.base as usize == base);
+			Some(value)
+		} else {
+			cold_path();
+			None
 		}
-
-		value
 	}
 
 	/// Calculates how many limbs are needed to store given number of digits.
 	///
-	/// The result may be overestimated, but it is guaranteed to be enough.
-	#[inline(never)]
+	/// The result may be overestimated.
+	#[inline]
 	pub fn digits_to_limbs(&self, digits: usize) -> usize {
 		const LIMB_BITS: Limb::DoubleValue = Limb::BITS as Limb::DoubleValue;
 		let digits = digits as Limb::DoubleValue;
@@ -60,42 +60,7 @@ impl BaseInfo {
 		) / (65536 * LIMB_BITS)) as usize
 	}
 
-	#[inline(never)]
-	pub fn parse_segment(
-		&self, input: &[u8], i: usize, mapping: &[i8; 256],
-	) -> (Limb, usize, usize) {
-		let base = self.base;
-		let digits_per_limb = self.multiples.len();
-		debug_assert!(digits_per_limb > 0);
-
-		let mut val: Limb::Value = 0;
-		let mut cnt = 0;
-
-		let mut i = i;
-		while i < input.len() {
-			let digit = unsafe { *mapping.get_unchecked(*input.get_unchecked(i) as usize) };
-			i += 1;
-			if (digit as u8) < base {
-				val = val * (base as Limb::Value) + (digit as u8 as Limb::Value);
-				cnt += 1;
-				if cnt >= digits_per_limb {
-					break;
-				}
-			} else {
-				if digit < 0 {
-					i -= 1;
-					cold_path();
-					break;
-				} else {
-					continue;
-				}
-			}
-		}
-
-		(Limb { val }, i, cnt)
-	}
-
-	#[inline(never)]
+	/*#[inline(never)]
 	pub fn parse_digits(
 		&self, r: &mut [Limb], digits: &[u8], mapping: &[i8; 256],
 	) -> Result<usize, (usize, Error)> {
@@ -172,5 +137,42 @@ impl BaseInfo {
 		}
 
 		Ok(len)
+	}*/
+}
+
+#[inline(never)]
+pub fn parse_segment<const BASE: usize>(input: &[u8], i: usize) -> (Limb, usize) {
+	debug_assert!(!BASE.is_power_of_two());
+
+	let mut m = BASE as Limb::Value;
+	let mut digits_per_limb = 1;
+	while let Some(n) = m.checked_mul(BASE as Limb::Value) {
+		m = n;
+		digits_per_limb += 1;
 	}
+	debug_assert!(digits_per_limb == BASE_INFO[BASE].multiples.len());
+
+	let mut val: Limb::Value = 0;
+	let e = (i + digits_per_limb).min(input.len());
+	for i in i..e {
+		let digit = unsafe { *input.get_unchecked(i) };
+		val = val * (BASE as Limb::Value) + (digit as Limb::Value);
+	}
+	(Limb { val }, e)
+}
+
+#[inline(never)]
+pub fn parse_segment_pow2<const BASE: usize>(input: &[u8], i: usize) -> (Limb, usize) {
+	debug_assert!(BASE.is_power_of_two());
+
+	let BASE_BITS = BASE.trailing_zeros() as usize;
+	let digits_per_limb = Limb::BITS / BASE_BITS;
+
+	let mut val: Limb::Value = 0;
+	let e = (i + digits_per_limb).min(input.len());
+	for i in i..e {
+		let digit = unsafe { *input.get_unchecked(i) };
+		val = val << BASE_BITS | (digit as Limb::Value);
+	}
+	(Limb { val }, e)
 }

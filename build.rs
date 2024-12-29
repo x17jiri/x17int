@@ -38,8 +38,8 @@ pub fn inv(val: usize) -> (usize, usize) {
 
 fn base_info() -> String {
 	let mut base_info = String::new();
+	base_info.push_str("use crate::base_info::{BaseInfo, parse_segment, parse_segment_pow2};\n");
 	base_info.push_str("use crate::blocks::Limb;\n");
-	base_info.push_str("use crate::base_info::BaseInfo;\n");
 	base_info.push_str("use core::num::NonZeroU8;\n");
 	base_info.push_str("\n");
 	base_info
@@ -79,6 +79,8 @@ fn base_info() -> String {
 				base_info.push_str(&format!("\t\t// This multiplicative inverse has an inprecision and will add an extra limb for every {} digits\n", cnt));
 			}
 			base_info.push_str(&format!("\t\t// digits_per_limb_inv: {},\n", inv));
+
+			base_info.push_str(&format!("\t\tparse_segment: parse_segment_pow2::<{}>,\n", base));
 		} else {
 			let bits_per_digit_ceil = ((base as f64).log2() * 65536.0).ceil() as usize;
 			let bits_per_digit_floor = ((base as f64).log2() * 65536.0).floor() as usize;
@@ -117,6 +119,7 @@ fn base_info() -> String {
 				base_info.push_str(&format!("\t\t// This multiplicative inverse has an inprecision and will add an extra limb for every {} digits\n", cnt));
 			}
 			base_info.push_str(&format!("\t\t// digits_per_limb_inv: {},\n", inv));
+			base_info.push_str(&format!("\t\tparse_segment: parse_segment::<{}>,\n", base));
 		}
 		base_info.push_str("\t\tmultiples: &[\n");
 		for m in multiples.iter() {
