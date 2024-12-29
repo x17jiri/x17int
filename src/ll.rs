@@ -306,7 +306,7 @@ unsafe fn __mul(
 		let mut re = rp.add(a.len());
 		let be = bp.add(b.len());
 
-		let mut t = blocks::mul_1_unchecked(rp, re, ap, bp.read());
+		let mut t = blocks::mul_1_unchecked(rp, re, ap, bp.read(), Limb::zero());
 		re.write(t);
 
 		rp = rp.add(1);

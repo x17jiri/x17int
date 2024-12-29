@@ -1,4 +1,4 @@
-//
+use Vec;
 
 type Limb = usize;
 type DoubleLimb = u128;
@@ -40,10 +40,19 @@ fn base_info() -> String {
 	let mut base_info = String::new();
 	base_info.push_str("use crate::blocks::Limb;\n");
 	base_info.push_str("use crate::base_info::BaseInfo;\n");
+	base_info.push_str("use core::num::NonZeroU8;\n");
 	base_info.push_str("\n");
 	base_info
 		.push_str(&format!("pub const BASE_INFO: [BaseInfo; {}] = [\n", MAX_BASE - MIN_BASE + 1));
 	for base in MIN_BASE..=MAX_BASE as usize {
+		let mut multiples = Vec::new();
+
+		let mut m = base as u128;
+		while m <= (1_u128 << LIMB_BITS) {
+			multiples.push(m);
+			m *= base as u128;
+		}
+
 		if base.is_power_of_two() {
 			let bits_per_digit = base.trailing_zeros() as usize;
 			let digits_per_limb = LIMB_BITS / bits_per_digit;
@@ -60,23 +69,16 @@ fn base_info() -> String {
 				bits_per_digit * 65536,
 				bits_per_digit
 			));
-			base_info.push_str(&format!("\t\tdigits_per_limb: {},\n", digits_per_limb));
+			base_info.push_str(&format!(
+				"\t\t// digits_per_limb: NonZeroU8::new({}).unwrap(),\n",
+				digits_per_limb
+			));
 			if cnt == 0 {
 				base_info.push_str("\t\t// This multiplicative inverse has no inprecision");
 			} else {
 				base_info.push_str(&format!("\t\t// This multiplicative inverse has an inprecision and will add an extra limb for every {} digits\n", cnt));
 			}
-			base_info.push_str(&format!("\t\tdigits_per_limb_inv: {},\n", inv));
-			if bits_per_digit * digits_per_limb == LIMB_BITS {
-				base_info.push_str(
-					"\t\t// big_base overflowed Limb, but it is not needed for powers of 2 bases anyway\n",
-				);
-			}
-			base_info.push_str(&format!(
-				"\t\tbig_base: Limb {{ val: {} }},\n",
-				((1 as u128) << (bits_per_digit * digits_per_limb)) as usize
-			));
-			base_info.push_str("\t},\n");
+			base_info.push_str(&format!("\t\t// digits_per_limb_inv: {},\n", inv));
 		} else {
 			let bits_per_digit_ceil = ((base as f64).log2() * 65536.0).ceil() as usize;
 			let bits_per_digit_floor = ((base as f64).log2() * 65536.0).floor() as usize;
@@ -105,16 +107,26 @@ fn base_info() -> String {
 				bits_per_digit_floor,
 				bits_per_digit_floor as f64 / 65536.0
 			));
-			base_info.push_str(&format!("\t\tdigits_per_limb: {},\n", digits_per_limb));
+			base_info.push_str(&format!(
+				"\t\t// digits_per_limb: NonZeroU8::new({}).unwrap(),\n",
+				digits_per_limb
+			));
 			if cnt == 0 {
 				base_info.push_str("\t\t// This multiplicative inverse has no inprecision");
 			} else {
 				base_info.push_str(&format!("\t\t// This multiplicative inverse has an inprecision and will add an extra limb for every {} digits\n", cnt));
 			}
-			base_info.push_str(&format!("\t\tdigits_per_limb_inv: {},\n", inv));
-			base_info.push_str(&format!("\t\tbig_base: Limb {{ val: {} }},\n", big_base));
-			base_info.push_str("\t},\n");
+			base_info.push_str(&format!("\t\t// digits_per_limb_inv: {},\n", inv));
 		}
+		base_info.push_str("\t\tmultiples: &[\n");
+		for m in multiples.iter() {
+			if *m > LIMB_MAX as u128 {
+				base_info.push_str("\t\t\t// value overflowed\n");
+			}
+			base_info.push_str(&format!("\t\t\tLimb {{ val: {} }},\n", *m as usize));
+		}
+		base_info.push_str("\t\t],\n");
+		base_info.push_str("\t},\n");
 	}
 	base_info.push_str("];\n");
 	base_info

@@ -1,6 +1,7 @@
 use crate::blocks::Limb;
 use crate::Error;
 use crate::{base_info_gen, blocks};
+use core::num::NonZeroU8;
 use std::intrinsics::{assume, cold_path};
 
 #[derive(Copy, Clone, Debug)]
@@ -8,9 +9,7 @@ pub struct BaseInfo {
 	pub base: u8,
 	pub bits_per_digit_ceil: usize,  // ceil(log2(base) * 65536)
 	pub bits_per_digit_floor: usize, // floor(log2(base) * 65536)
-	pub digits_per_limb: u8,
-	pub digits_per_limb_inv: usize,
-	pub big_base: Limb, // base ** digits_per_limb
+	pub multiples: &'static [Limb],
 }
 
 impl BaseInfo {
@@ -62,50 +61,116 @@ impl BaseInfo {
 	}
 
 	#[inline(never)]
-	pub fn parse_segment(&self, segment: &[u8]) -> Limb {
-		let base = self.base as Limb::Value;
+	pub fn parse_segment(
+		&self, input: &[u8], i: usize, mapping: &[i8; 256],
+	) -> (Limb, usize, usize) {
+		let base = self.base;
+		let digits_per_limb = self.multiples.len();
+		debug_assert!(digits_per_limb > 0);
+
 		let mut val: Limb::Value = 0;
-		for digit in segment {
-			val = val * base + (*digit as Limb::Value);
-		}
-		Limb { val }
-	}
+		let mut cnt = 0;
 
-	#[inline(never)]
-	pub fn parse_digits(&self, r: &mut [Limb], digits: &[u8]) -> usize {
-		if digits.is_empty() || r.is_empty() {
-			return 0;
-		}
-
-		let big_base = self.big_base;
-		let digits_per_limb = self.digits_per_limb as usize;
-		unsafe { assume(digits_per_limb != 0) };
-		//-- Parse the top limb.
-
-		let segments =
-			(((digits.len() as u128) * (self.digits_per_limb_inv as u128)) >> usize::BITS) as usize;
-		let top_len = digits.len().wrapping_sub(unsafe { segments.unchecked_mul(digits_per_limb) });
-
-		let top_len =
-			if top_len < digits_per_limb { top_len } else { digits.len() % digits_per_limb };
-		let top = self.parse_segment(unsafe { digits.get_unchecked(..top_len) });
-		r[0] = top;
-		let mut len = top.is_not_zero() as usize;
-
-		//-- Parse the rest
-
-		let rp = r.as_mut_ptr();
-		for i in (top_len..digits.len()).step_by(digits_per_limb) {
-			let new_bottom =
-				self.parse_segment(unsafe { digits.get_unchecked(i..i + digits_per_limb) });
-			let new_top = unsafe { blocks::mul_1_unchecked_(rp, rp.add(len), big_base) };
-			r[0].val += new_bottom.val;
-			if new_top.is_not_zero() && len < r.len() {
-				r[len] = new_top;
-				len += 1;
+		let mut i = i;
+		while i < input.len() {
+			let digit = unsafe { *mapping.get_unchecked(*input.get_unchecked(i) as usize) };
+			i += 1;
+			if (digit as u8) < base {
+				val = val * (base as Limb::Value) + (digit as u8 as Limb::Value);
+				cnt += 1;
+				if cnt >= digits_per_limb {
+					break;
+				}
+			} else {
+				if digit < 0 {
+					i -= 1;
+					cold_path();
+					break;
+				} else {
+					continue;
+				}
 			}
 		}
 
-		len
+		(Limb { val }, i, cnt)
+	}
+
+	#[inline(never)]
+	pub fn parse_digits(
+		&self, r: &mut [Limb], digits: &[u8], mapping: &[i8; 256],
+	) -> Result<usize, (usize, Error)> {
+		let mut len = 0;
+
+		let (limb, mut i, cnt) = self.parse_segment(digits, 0, mapping);
+		if limb.is_not_zero() {
+			if let Some(r) = r.get_mut(0) {
+				*r = limb;
+				len += 1;
+			} else {
+				cold_path();
+				return Err((0, Error::new_buffer_too_small("BaseInfo::parse_digits")));
+			}
+		}
+
+		if i >= digits.len() {
+			// We've parsed the entire input.
+			return Ok(len);
+		}
+
+		if cnt < self.multiples.len() {
+			// If we didn't parse the entire input and we didn't get a whole limb,
+			// there was a parsing error.
+			cold_path();
+			return Err((i, Error::new_parse_error("BaseInfo::parse_digits")));
+		}
+
+		// Repeat while we have some input left.
+		while i < digits.len() {
+			let (limb, j, cnt) = self.parse_segment(digits, 0, mapping);
+			if cnt < self.multiples.len() {
+				// We didn't get a whole limb.
+
+				if j < digits.len() {
+					// If we are not at the end of the input, there was a parsing error.
+					cold_path();
+					return Err((i, Error::new_parse_error("BaseInfo::parse_digits")));
+				}
+
+				if cnt == 0 {
+					// We didn't parse any digits.
+					// We need to cover this case because we will access self.multiples[cnt - 1].
+					cold_path();
+					break;
+				}
+			}
+
+			if cnt > self.multiples.len() {
+				// This would be a bug in the code.
+				// We need to cover it in order to safely access self.multiples[cnt - 1].
+				cold_path();
+				return Err((i, Error::new_internal_error("BaseInfo::parse_digits")));
+			}
+
+			i = j;
+			let h = //.
+				unsafe {
+					let rp = r.as_mut_ptr();
+					let re = rp.add(len);
+					assume(cnt > 0);
+					assume(cnt <= self.multiples.len());
+					blocks::mul_1_unchecked_(rp, re, self.multiples[cnt - 1], limb)
+				};
+			if h.is_not_zero() {
+				if let Some(r) = r.get_mut(len) {
+					*r = h;
+					len += 1;
+				} else {
+					cold_path();
+					return Err((i, Error::new_buffer_too_small("BaseInfo::parse_digits")));
+				}
+			}
+		}
+
+		Ok(len)
 	}
 }

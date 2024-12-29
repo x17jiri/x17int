@@ -326,6 +326,35 @@ pub unsafe fn add_1_unchecked(rp: *mut Limb, ap: *const Limb, b: Limb, i: usize,
 	}
 }
 
+pub unsafe fn add_carry_unchecked_(rp: *mut Limb, re: *mut Limb, carry: bool) -> bool {
+	unsafe {
+		let mut rp = rp;
+		let mut carry = carry;
+		while carry {
+			if rp == re {
+				return true;
+			}
+
+			let (sum, overflow) = Limb::addc(rp.read(), Limb::zero(), carry);
+			rp.write(sum);
+			carry = overflow;
+
+			rp = rp.add(1);
+		}
+
+		false
+	}
+}
+
+/// In-place version of `add_1_unchecked()`.
+pub unsafe fn add_1_unchecked_(rp: *mut Limb, re: *mut Limb, b: Limb) -> bool {
+	debug_assert!(rp < re);
+	unsafe {
+		let (mut sum, mut carry) = Limb::addc(rp.read(), b, false);
+		add_carry_unchecked_(rp.add(1), re, carry)
+	}
+}
+
 //--------------------------------------------------------------------------------------------------
 // sub
 
@@ -401,12 +430,14 @@ pub unsafe fn sub_1_unchecked(rp: *mut Limb, ap: *const Limb, b: Limb, i: usize,
 /// - n > 0
 /// - a.len() > 0
 #[inline(never)]
-pub unsafe fn mul_1_unchecked(rp: *mut Limb, re: *mut Limb, ap: *const Limb, b: Limb) -> Limb {
+pub unsafe fn mul_1_unchecked(
+	rp: *mut Limb, re: *mut Limb, ap: *const Limb, b: Limb, c: Limb,
+) -> Limb {
 	unsafe {
 		let mut rp = rp;
 		let mut ap = ap;
 
-		let mut carry = Limb::zero();
+		let mut carry = c;
 		while rp != re {
 			let [lo, hi] = Limb::mul(ap.read(), b, carry, Limb::zero());
 			rp.write(lo);
@@ -421,11 +452,11 @@ pub unsafe fn mul_1_unchecked(rp: *mut Limb, re: *mut Limb, ap: *const Limb, b: 
 
 /// In-place version of `mul_1_unchecked()`.
 #[inline(never)]
-pub unsafe fn mul_1_unchecked_(rp: *mut Limb, re: *mut Limb, b: Limb) -> Limb {
+pub unsafe fn mul_1_unchecked_(rp: *mut Limb, re: *mut Limb, b: Limb, c: Limb) -> Limb {
 	unsafe {
 		let mut rp = rp;
 
-		let mut carry = Limb::zero();
+		let mut carry = c;
 		while rp != re {
 			let [lo, hi] = Limb::mul(rp.read(), b, carry, Limb::zero());
 			rp.write(lo);

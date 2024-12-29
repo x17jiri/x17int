@@ -10,6 +10,8 @@ pub struct Error {
 pub enum ErrorKind {
 	AllocationFailed,
 	BufferTooSmall,
+	ParseError,
+	InternalError,
 }
 
 impl std::fmt::Debug for Error {
@@ -29,6 +31,14 @@ impl Error {
 
 	pub fn new_buffer_too_small(msg: &'static str) -> Self {
 		Self::new(ErrorKind::BufferTooSmall, msg)
+	}
+
+	pub fn new_parse_error(msg: &'static str) -> Self {
+		Self::new(ErrorKind::ParseError, msg)
+	}
+
+	pub fn new_internal_error(msg: &'static str) -> Self {
+		Self::new(ErrorKind::InternalError, msg)
 	}
 }
 
