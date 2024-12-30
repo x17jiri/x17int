@@ -71,6 +71,7 @@ fn base_conv() -> String {
 				bits_per_digit * 65536,
 				bits_per_digit
 			));
+			base_conv.push_str("\t\t// digits_per_limb is equal to multiples.len()\n");
 			base_conv.push_str(&format!(
 				"\t\t// digits_per_limb: NonZeroU8::new({}).unwrap(),\n",
 				digits_per_limb
@@ -80,7 +81,7 @@ fn base_conv() -> String {
 			} else {
 				base_conv.push_str(&format!("\t\t// This multiplicative inverse has an inprecision and will add an extra limb for every {} digits\n", cnt));
 			}
-			base_conv.push_str(&format!("\t\t// digits_per_limb_inv: {},\n", inv));
+			base_conv.push_str(&format!("\t\tdigits_per_limb_inv: {},\n", inv));
 
 			base_conv.push_str(&format!(
 				"\t\tparse_first_segment: parse_first_segment_pow2::<{}>,\n",
@@ -118,6 +119,7 @@ fn base_conv() -> String {
 				bits_per_digit_floor,
 				bits_per_digit_floor as f64 / 65536.0
 			));
+			base_conv.push_str("\t\t// digits_per_limb is equal to multiples.len()\n");
 			base_conv.push_str(&format!(
 				"\t\t// digits_per_limb: NonZeroU8::new({}).unwrap(),\n",
 				digits_per_limb
@@ -127,7 +129,7 @@ fn base_conv() -> String {
 			} else {
 				base_conv.push_str(&format!("\t\t// This multiplicative inverse has an inprecision and will add an extra limb for every {} digits\n", cnt));
 			}
-			base_conv.push_str(&format!("\t\t// digits_per_limb_inv: {},\n", inv));
+			base_conv.push_str(&format!("\t\tdigits_per_limb_inv: {},\n", inv));
 			base_conv
 				.push_str(&format!("\t\tparse_first_segment: parse_first_segment::<{}>,\n", base));
 			base_conv

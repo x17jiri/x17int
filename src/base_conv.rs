@@ -12,6 +12,7 @@ pub struct BaseConv {
 	pub base: u8,
 	pub bits_per_digit_ceil: usize,  // ceil(log2(base) * 65536)
 	pub bits_per_digit_floor: usize, // floor(log2(base) * 65536)
+	pub digits_per_limb_inv: usize,
 	pub last_multiple: Limb,
 	pub multiples: &'static [Limb],
 	pub parse_first_segment: fn(input: &[u8]) -> (Limb, usize),
@@ -125,20 +126,11 @@ impl BaseConv {
 		type Big = u128;
 		const _: () = assert!(std::mem::size_of::<Big>() >= 2 * std::mem::size_of::<usize>());
 
-		const LIMB_BITS: Big = Limb::BITS as Big;
-		let ndigits = ndigits as Big;
-		let bits_per_digit_ceil = self.bits_per_digit_ceil as Big;
-		let limbs = ((
-			// number of bits as a fixed point number with 16 fractional bits
-			ndigits * bits_per_digit_ceil
-
-			// round up to whole bits
-			+ 65535
-
-			// round up to whole limbs
-			+ 65536 * (LIMB_BITS - 1)
-		) / (65536 * LIMB_BITS)) as usize;
-		limbs
+		let digits_per_limb = self.multiples.len();
+		let ndigits = (ndigits + digits_per_limb - 1) as Big;
+		let inv = self.digits_per_limb_inv as Big;
+		let nlimbs = (ndigits * inv) >> usize::BITS;
+		(nlimbs as usize) + 1
 	}
 
 	/// This is unsafe because it has the following assumptions:
@@ -213,7 +205,7 @@ impl BaseConv {
 }
 
 #[inline(never)]
-pub fn parse_first_segment<const BASE: usize>(input: &[u8]) -> (Limb, usize) {
+pub fn digits_to_limbs<const BASE: usize>(digits: &[u8], limbs: &mut [Limb]) -> &mut [Limb] {
 	debug_assert!(!BASE.is_power_of_two());
 
 	let mut m = BASE as Limb::Value;

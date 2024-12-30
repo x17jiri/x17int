@@ -27,11 +27,35 @@
 use core::ptr::NonNull;
 use std::intrinsics::{assume, cold_path, likely, unlikely};
 use std::num::NonZeroUsize;
+use thin_vec::ThinVec;
 
 use crate::base_conv::BaseConv;
 use crate::blocks;
 pub use crate::blocks::Limb;
 use crate::error::{assert, Error, ErrorKind};
+
+/// Say we have an operation that writes data to a provided buffer, but the buffer may be too small.
+///
+/// We can use:
+/// ```rust
+///     match operation(buffer) {
+///         Borrowed(len) => {
+///             if len <= buffer.len() {
+///                 // buffer[0..<len] contains the result
+///             } else {
+///                 cold_path();
+///                 // the buffer was too small and allocation of a larger buffer failed
+///             }
+///         },
+///         Owned(vec) => {
+///             // vec contains the result
+///         }
+///     }
+/// ```
+enum MaybeOwned {
+	Borrowed(usize),
+	Owned(ThinVec<Limb>), // TODO - use OwnedBuffer instead of ThinVec?
+}
 
 //--------------------------------------------------------------------------------------------------
 // bit_width
