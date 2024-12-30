@@ -468,6 +468,11 @@ pub unsafe fn mul_1_unchecked_(rp: *mut Limb, re: *mut Limb, b: Limb, c: Limb) -
 	}
 }
 
+#[inline]
+pub fn mul_1_(r: &mut [Limb], b: Limb, c: Limb) -> Limb {
+	unsafe { mul_1_unchecked_(r.as_mut_ptr(), r.as_mut_ptr().add(r.len()), b, c) }
+}
+
 #[inline(never)]
 pub unsafe fn addmul_1_unchecked(rp: *mut Limb, re: *mut Limb, ap: *const Limb, b: Limb) -> Limb {
 	unsafe {

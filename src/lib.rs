@@ -15,6 +15,7 @@
 #![feature(ptr_as_ref_unchecked)]
 
 use core::panic;
+use smallvec::SmallVec;
 use std::alloc::{Allocator, Global, Layout};
 use std::char::MAX;
 use std::intrinsics::{assume, cold_path, likely, unlikely};
@@ -24,8 +25,8 @@ use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 use std::result;
 
-pub mod base_info;
-pub mod base_info_gen;
+pub mod base_conv;
+pub mod base_conv_gen;
 pub mod blocks;
 pub mod buf;
 pub mod error;
@@ -34,6 +35,7 @@ pub mod ll;
 pub mod tagged_ptr;
 
 //use buf::{Buffer, InlineBuffer};
+use base_conv::BaseConv;
 use error::{assert, Error, ErrorKind};
 use ll::{numcpy_est, Limb};
 use tagged_ptr::TaggedPtr;
@@ -199,6 +201,73 @@ impl Int {
 		}
 	}
 
+	fn new_with_small_buf(
+		buf: &[Limb; MIN_ALLOC_SIZE], len: usize, neg: bool,
+	) -> Result<Self, Error> {
+		if len <= Self::ONE_LIMB {
+			Ok(Self::new_inline(buf[0], neg))
+		} else {
+			let mut heap_buf = Self::alloc_buf(MIN_ALLOC_SIZE).map_err(|e| {
+				cold_path();
+				e
+			})?;
+			unsafe {
+				std::ptr::copy_nonoverlapping(
+					buf.as_ptr(),
+					heap_buf.as_mut_slice().as_mut_ptr(),
+					MIN_ALLOC_SIZE,
+				);
+			}
+			Self::new_with_buf(heap_buf, len, neg)
+		}
+	}
+
+	#[inline(never)]
+	fn __from_digits(neg: bool, digits: &[u8], base: &BaseConv) -> Result<Self, Error> {
+		let limbs = base.digits_to_int_est(digits.len());
+		if limbs <= Int::ONE_LIMB + 1 {
+			const _: () = assert!(Int::ONE_LIMB + 1 <= MIN_ALLOC_SIZE);
+			let mut buf = [Limb::default(); MIN_ALLOC_SIZE];
+			let len = base.digits_to_int(&mut buf, digits).map_err(|e| {
+				cold_path();
+				e
+			})?;
+			Self::new_with_small_buf(&buf, len, neg)
+		} else {
+			let mut buf = Self::alloc_buf(limbs).map_err(|e| {
+				cold_path();
+				e
+			})?;
+			let len = base.digits_to_int(&mut buf, digits).map_err(|e| {
+				cold_path();
+				e
+			})?;
+			Self::new_with_buf(buf, len, neg)
+		}
+	}
+
+	pub fn __from_str(str: &str, base: &BaseConv) -> Result<Self, Error> {
+		const SMALL_BUF_SIZE: usize = 64;
+		if str.len() <= SMALL_BUF_SIZE {
+			let mut digits = [0; SMALL_BUF_SIZE];
+			let (neg, ndigits) = base.str_to_digits(str, &mut digits)?;
+			Self::__from_digits(neg, &digits[..ndigits], base)
+		} else {
+			let mut vec = Vec::<u8>::with_capacity(str.len());
+			let digits = unsafe { std::slice::from_raw_parts_mut(vec.as_mut_ptr(), str.len()) };
+			let (neg, ndigits) = base.str_to_digits(str, digits)?;
+			Self::__from_digits(neg, &digits[..ndigits], base)
+		}
+	}
+
+	pub fn from_str(str: &str, base: usize) -> Result<Self, Error> {
+		let base = BaseConv::get(base).ok_or_else(|| {
+			cold_path();
+			Error::new_invalid_base("Int::from_str")
+		})?;
+		Self::__from_str(str, base)
+	}
+
 	pub fn extract_buf(self) -> Option<OwnedBuffer> {
 		let this = ManuallyDrop::new(self);
 		let buf = this.__buf_view();
@@ -298,9 +367,15 @@ impl Int {
 	}
 
 	pub fn alloc_buf(n: usize) -> Result<OwnedBuffer, Error> {
-		let buf = Self::__alloc_buf(n)?;
+		let buf = Self::__alloc_buf(n).map_err(|e| {
+			cold_path();
+			e
+		})?;
 		// SAFETY: We verify this in `__alloc_buf()`.
-		unsafe { assume(buf.cap.get() >= n) };
+		unsafe {
+			assume(buf.cap.get() >= n);
+			assume(buf.cap.get() >= MIN_ALLOC_SIZE);
+		}
 		Ok(buf)
 	}
 

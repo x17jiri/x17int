@@ -11,6 +11,7 @@ pub enum ErrorKind {
 	AllocationFailed,
 	BufferTooSmall,
 	ParseError,
+	InvalidBase,
 	InternalError,
 }
 
@@ -31,6 +32,10 @@ impl Error {
 
 	pub fn new_buffer_too_small(msg: &'static str) -> Self {
 		Self::new(ErrorKind::BufferTooSmall, msg)
+	}
+
+	pub fn new_invalid_base(msg: &'static str) -> Self {
+		Self::new(ErrorKind::InvalidBase, msg)
 	}
 
 	pub fn new_parse_error(msg: &'static str) -> Self {

@@ -28,7 +28,7 @@ use core::ptr::NonNull;
 use std::intrinsics::{assume, cold_path, likely, unlikely};
 use std::num::NonZeroUsize;
 
-use crate::base_info::BaseInfo;
+use crate::base_conv::BaseConv;
 use crate::blocks;
 pub use crate::blocks::Limb;
 use crate::error::{assert, Error, ErrorKind};
@@ -327,18 +327,6 @@ unsafe fn __mul(
 		blocks::cold_trim_unchecked(rp, 0, len)
 	}
 }
-
-//--------------------------------------------------------------------------------------------------
-// str to int
-
-#[inline]
-pub fn str_to_int_est(ndigits: usize, base: usize) -> Option<usize> {
-	Some(BaseInfo::get(base)?.digits_to_limbs(ndigits))
-}
-
-//pub fn str_to_int(r: &mut [Limb], digits: &[u8], base: u8) -> Result<usize, Error> {
-//	//
-//}
 
 //--------------------------------------------------------------------------------------------------
 
