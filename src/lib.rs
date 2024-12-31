@@ -205,7 +205,7 @@ impl Int {
 		Err(Error::new_alloc_failed("Int::__from_digits")) // TODO
 	}
 
-	pub fn __from_str(str: &str, base: &BaseConv) -> Result<Self, Error> {
+	/*	pub fn __from_str(str: &str, base: &BaseConv) -> Result<Self, Error> {
 		const SMALL_BUF_SIZE: usize = 64;
 		if str.len() <= SMALL_BUF_SIZE {
 			let mut digits = [0; SMALL_BUF_SIZE];
@@ -217,15 +217,60 @@ impl Int {
 			let (neg, ndigits) = base.str_to_digits(str, digits)?;
 			Self::__from_digits(neg, &digits[..ndigits], base)
 		}
+	}*/
+
+	#[inline(never)]
+	pub fn from_str_slow(
+		neg: bool, first_limb: Limb, bytes: &[u8], pos: usize,
+	) -> Result<Self, Error> {
+		// first convert the string to a list of digits
+		let mut digits_buf = SmallVec::<[u8; 128]>::new();
+		let pos3 =
+			base_conv::parse_digits::<10>(bytes, &base_conv_gen::SHORT_MAPPING, &mut digits_buf);
+		if pos3 != bytes.len() {
+			cold_path();
+			return Err(Error::new_parse_error("Int::from_str_slow"));
+		}
+
+		let mut limb_buf = [Limb::default(); 8];
+		let (limb_buf, len) =
+			base_conv::digits_to_limbs::<10>(digits_buf.as_slice(), first_limb, &mut limb_buf)?;
+
+		Ok(Self::new_zero()) // TODO
 	}
 
-	pub fn from_str(str: &str, base: usize) -> Result<Self, Error> {
+	#[inline(never)]
+	pub fn from_str(str: &str) -> Result<Self, Error> {
+		let bytes = str.as_bytes();
+		if bytes.is_empty() {
+			cold_path();
+			return Ok(Self::new_zero());
+		}
+
+		let (neg, pos1) = //.
+			match bytes[0] {
+				b'-' => (true, 1),
+				b'+' => (false, 1),
+				_ => (false, 0),
+			};
+		let bytes = &bytes[pos1..];
+
+		let (short, pos2) = base_conv::parse_short::<10>(bytes, &base_conv_gen::SHORT_MAPPING);
+		if pos2 == bytes.len() {
+			Ok(Self::new_inline(short, neg))
+		} else {
+			let bytes = &bytes[pos2..];
+			Self::from_str_slow(neg, short, bytes, pos1 + pos2)
+		}
+	}
+
+	/*	pub fn from_str_with_base(str: &str, base: usize) -> Result<Self, Error> {
 		let base = BaseConv::get(base).ok_or_else(|| {
 			cold_path();
 			Error::new_invalid_base("Int::from_str")
 		})?;
 		Self::__from_str(str, base)
-	}
+	}*/
 
 	pub fn extract_buf(self) -> Option<LimbBuf> {
 		let this = ManuallyDrop::new(self);
@@ -366,18 +411,7 @@ impl Int {
 	}
 
 	#[inline(never)]
-	pub fn try_add_or_sub(a: &Int, sub: bool, b: &Int) -> Result<Int, Error> {
-		let sub = a.is_negative() ^ (sub ^ b.is_negative());
-		if sub {
-			if let Some(small) = Self::try_sub_small(a, b) {
-				return Ok(small);
-			}
-		} else {
-			if let Some(small) = Self::try_add_small(a, b) {
-				return Ok(small);
-			}
-		}
-
+	fn try_add_or_sub_slow(a: &Int, sub: bool, b: &Int) -> Result<Int, Error> {
 		// slow path
 		let a = a.view();
 		let b = b.view();
@@ -397,6 +431,22 @@ impl Int {
 			unsafe { assume(len <= r.cap()) };
 			Self::new_with_buf(r, len, a.neg)
 		}
+	}
+
+	#[inline(never)]
+	pub fn try_add_or_sub(a: &Int, sub: bool, b: &Int) -> Result<Int, Error> {
+		let sub = a.is_negative() ^ (sub ^ b.is_negative());
+		if sub {
+			if let Some(small) = Self::try_sub_small(a, b) {
+				return Ok(small);
+			}
+		} else {
+			if let Some(small) = Self::try_add_small(a, b) {
+				return Ok(small);
+			}
+		}
+
+		Self::try_add_or_sub_slow(a, sub, b)
 	}
 
 	#[inline]

@@ -275,16 +275,6 @@ pub fn parse_digits<const BASE: usize>(
 }
 
 #[inline(never)]
-pub fn parse10_short(bytes: &[u8]) -> (Limb, usize) {
-	parse_short::<10>(bytes, &base_conv_gen::SHORT_MAPPING)
-}
-
-#[inline(never)]
-pub fn parse10_digits(bytes: &[u8], vec: &mut SmallVec<[u8; 128]>) -> usize {
-	parse_digits::<10>(bytes, &base_conv_gen::SHORT_MAPPING, vec)
-}
-
-#[inline(never)]
 pub fn digits_to_limbs<const BASE: usize>(
 	digits: &[u8], first_limb: Limb, limbs: &mut [Limb],
 ) -> Result<(Option<LimbBuf>, usize), Error> {
@@ -313,25 +303,29 @@ pub fn digits_to_limbs<const BASE: usize>(
 	// SAFETY: Either there already was enough capacity, or `LimbBuf::new(required_cap)` succeeded
 	unsafe { assume(buf.len() >= required_cap) };
 
-	// first limb
-	buf[0] = first_limb;
-	let mut len = 1;
+	// first and second limb
+	let mut first_limb = first_limb;
+	let mut second_limb = Limb::zero();
 
-	// second limb
-	if second_limb_digits > 0 {
-		let mut m = Limb::one();
-		let mut limb = Limb::zero();
-		for digit in &digits[..second_limb_digits] {
-			m.val *= BASE as Limb::Value;
-			limb.val = limb.val * (BASE as Limb::Value) + (*digit as Limb::Value);
-		}
+	let mut m = Limb::one();
+	for _ in 0..(digits_per_limb - second_limb_digits) {
+		let digit = first_limb.val % (BASE as Limb::Value);
+		first_limb.val /= BASE as Limb::Value;
 
-		let m = Limb::mul(first_limb, m, limb, Limb::zero());
-
-		buf[0] = m[1];
-		buf[1] = m[0];
-		len = 2;
+		second_limb.val += digit * m.val;
+		m.val *= BASE as Limb::Value;
 	}
+
+	let mut m = Limb::one();
+	for digit in &digits[..second_limb_digits] {
+		m.val *= BASE as Limb::Value;
+		second_limb.val = second_limb.val * (BASE as Limb::Value) + (*digit as Limb::Value);
+	}
+
+	buf[0] = first_limb;
+	let mut len = first_limb.is_not_zero() as usize;
+	buf[len] = second_limb;
+	len += second_limb.is_not_zero() as usize;
 
 	// rest of the limbs
 	if following_limb_cnt > 0 {
@@ -344,9 +338,8 @@ pub fn digits_to_limbs<const BASE: usize>(
 			unsafe { assume(digits.len() >= digits_per_limb) };
 
 			// SAFETY: This loop will run `following_limb_cnt` times. At the beginning,
-			// `len` is 1 or 2. We add 1 each iteration.
-			// So at the end, `len` will be at most `following_limb_cnt + 2`, which is
-			// the capacity of `buf`.
+			// `len == 2``. We add 1 each iteration.
+			// So at the end, `len` will be `following_limb_cnt + 2`, which is the capacity of `buf`
 			unsafe { assume(len < buf.len()) };
 
 			let mut limb = Limb::zero();
