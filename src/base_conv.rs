@@ -1,6 +1,7 @@
 use crate::base_conv_gen::BASE_CONV;
 use crate::blocks::Limb;
 use crate::Error;
+use crate::LimbBuf;
 use crate::{base_conv_gen, blocks};
 use core::num::NonZeroU8;
 use smallvec::{Array, SmallVec};
@@ -15,8 +16,8 @@ pub struct BaseConv {
 	pub digits_per_limb_inv: usize,
 	pub last_multiple: Limb,
 	pub multiples: &'static [Limb],
-	pub parse_first_segment: fn(input: &[u8]) -> (Limb, usize),
-	pub parse_next_segment: fn(segment: &[u8]) -> Limb,
+	//	pub parse_first_segment: fn(input: &[u8]) -> (Limb, usize),
+	//	pub parse_next_segment: fn(segment: &[u8]) -> Limb,
 }
 
 impl BaseConv {
@@ -132,7 +133,7 @@ impl BaseConv {
 		let nlimbs = (ndigits * inv) >> usize::BITS;
 		(nlimbs as usize) + 1
 	}
-
+	/*
 	/// This is unsafe because it has the following assumptions:
 	/// - `input` is NOT empty
 	/// - `len <= r.len()`
@@ -201,30 +202,178 @@ impl BaseConv {
 		} else {
 			Ok(len)
 		}
+	}*/
+}
+
+const fn digits_per_limb(base: usize) -> usize {
+	let mut m = base as Limb::DoubleValue;
+	let mut digits_per_limb = 1;
+	while m <= ((1 as Limb::DoubleValue) << Limb::BITS) {
+		m *= base as Limb::DoubleValue;
+		digits_per_limb += 1;
 	}
+	digits_per_limb
 }
 
 #[inline(never)]
-pub fn digits_to_limbs<const BASE: usize>(digits: &[u8], limbs: &mut [Limb]) -> &mut [Limb] {
-	debug_assert!(!BASE.is_power_of_two());
+pub fn parse_short<const BASE: usize>(bytes: &[u8], mapping: &[i8; 256]) -> (Limb, usize) {
+	let digits_per_limb = const { digits_per_limb(BASE) };
+	let split = digits_per_limb.min(bytes.len());
 
-	let mut m = BASE as Limb::Value;
-	let mut digits_per_limb = 1;
-	while let Some(n) = m.checked_mul(BASE as Limb::Value) {
-		m = n;
-		digits_per_limb += 1;
-	}
-	debug_assert!(digits_per_limb == BASE_CONV[BASE].multiples.len());
+	// For the first `digits_per_limb` digits, we don't have to check for overflow
 
 	let mut val: Limb::Value = 0;
-	let e = if input.len() > digits_per_limb { input.len() % digits_per_limb } else { input.len() };
-	for i in 0..e {
-		let digit = unsafe { *input.get_unchecked(i) };
-		val = val * (BASE as Limb::Value) + (digit as Limb::Value);
+	for i in 0..split {
+		let digit = mapping[bytes[i] as usize];
+		if (digit as u8) < (BASE as u8) {
+			val = val * (BASE as Limb::Value) + (digit as Limb::Value);
+		} else if digit < 0 {
+			continue;
+		} else {
+			return (Limb { val }, i);
+		}
 	}
-	(Limb { val }, e)
+
+	// For the rest of the digits, we have to check for overflow
+	// Note that overflow doesn't have to happen for several reasons:
+	// - there could be leading zeros
+	// - the first digit could be small
+	// - there could be skipped characters (mapping < 0)
+
+	for i in split..bytes.len() {
+		let digit = mapping[bytes[i] as usize];
+		if (digit as u8) < (BASE as u8)
+			&& let Some(a) = val.checked_mul(BASE as Limb::Value)
+			&& let Some(b) = a.checked_add(digit as Limb::Value)
+		{
+			val = b;
+		} else if digit < 0 {
+			continue;
+		} else {
+			return (Limb { val }, i);
+		}
+	}
+
+	(Limb { val }, bytes.len())
 }
 
+#[inline(never)]
+pub fn parse_digits<const BASE: usize>(
+	bytes: &[u8], mapping: &[i8; 256], vec: &mut SmallVec<[u8; 128]>,
+) -> usize {
+	for i in 0..bytes.len() {
+		let digit = mapping[bytes[i] as usize];
+		if (digit as u8) < (BASE as u8) {
+			vec.push(digit as u8);
+		} else if digit < 0 {
+			continue;
+		} else {
+			return i;
+		}
+	}
+	bytes.len()
+}
+
+#[inline(never)]
+pub fn parse10_short(bytes: &[u8]) -> (Limb, usize) {
+	parse_short::<10>(bytes, &base_conv_gen::SHORT_MAPPING)
+}
+
+#[inline(never)]
+pub fn parse10_digits(bytes: &[u8], vec: &mut SmallVec<[u8; 128]>) -> usize {
+	parse_digits::<10>(bytes, &base_conv_gen::SHORT_MAPPING, vec)
+}
+
+#[inline(never)]
+pub fn digits_to_limbs<const BASE: usize>(
+	digits: &[u8], first_limb: Limb, limbs: &mut [Limb],
+) -> Result<(Option<LimbBuf>, usize), Error> {
+	let digits_per_limb = const { digits_per_limb(BASE) };
+	debug_assert!(digits_per_limb == BASE_CONV[BASE].multiples.len());
+
+	if digits.is_empty() {
+		cold_path();
+		return Ok((None, 0));
+	}
+
+	let second_limb_digits = digits.len() % digits_per_limb;
+	let following_limb_cnt = digits.len() / digits_per_limb;
+
+	let required_cap = following_limb_cnt + 2;
+	let mut heap_buf;
+	let buf;
+	if limbs.len() >= required_cap {
+		heap_buf = None;
+		buf = limbs;
+	} else {
+		cold_path();
+		heap_buf = Some(LimbBuf::new(required_cap)?);
+		buf = &mut heap_buf.as_mut().unwrap()[..];
+	}
+	// SAFETY: Either there already was enough capacity, or `LimbBuf::new(required_cap)` succeeded
+	unsafe { assume(buf.len() >= required_cap) };
+
+	// first limb
+	buf[0] = first_limb;
+	let mut len = 1;
+
+	// second limb
+	if second_limb_digits > 0 {
+		let mut m = Limb::one();
+		let mut limb = Limb::zero();
+		for digit in &digits[..second_limb_digits] {
+			m.val *= BASE as Limb::Value;
+			limb.val = limb.val * (BASE as Limb::Value) + (*digit as Limb::Value);
+		}
+
+		let m = Limb::mul(first_limb, m, limb, Limb::zero());
+
+		buf[0] = m[1];
+		buf[1] = m[0];
+		len = 2;
+	}
+
+	// rest of the limbs
+	if following_limb_cnt > 0 {
+		let mut digits = &digits[second_limb_digits..];
+
+		loop {
+			// SAFETY: When we removed `second_limb_digits` digits from `digits`,
+			// the new len was exactly `following_limb_cnt * digits_per_limb`.
+			// We remove `digits_per_limb` digits in each iteration until `digits` is empty.
+			unsafe { assume(digits.len() >= digits_per_limb) };
+
+			// SAFETY: This loop will run `following_limb_cnt` times. At the beginning,
+			// `len` is 1 or 2. We add 1 each iteration.
+			// So at the end, `len` will be at most `following_limb_cnt + 2`, which is
+			// the capacity of `buf`.
+			unsafe { assume(len < buf.len()) };
+
+			let mut limb = Limb::zero();
+			for digit in &digits[..digits_per_limb] {
+				limb.val = limb.val * (BASE as Limb::Value) + (*digit as Limb::Value);
+			}
+			buf[len] = limb;
+			len += 1;
+
+			digits = &digits[digits_per_limb..];
+			if digits.is_empty() {
+				break;
+			}
+		}
+	}
+
+	Ok((heap_buf, len)) // TODO - trim
+}
+
+#[inline(never)]
+pub fn digits10_to_limbs(
+	digits: &[u8], first_limb: Limb, limbs: &mut [Limb],
+) -> Result<(Option<LimbBuf>, usize), Error> {
+	digits_to_limbs::<10>(digits, first_limb, limbs)
+}
+
+/*
 #[inline(never)]
 pub fn parse_first_segment_pow2<const BASE: usize>(input: &[u8]) -> (Limb, usize) {
 	debug_assert!(BASE.is_power_of_two());
@@ -287,3 +436,4 @@ pub fn parse_next_segment_pow2<const BASE: usize>(segment: &[u8]) -> Limb {
 		Limb::zero()
 	}
 }
+*/

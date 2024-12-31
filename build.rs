@@ -40,7 +40,7 @@ pub fn inv(val: usize) -> (usize, usize) {
 
 fn base_conv() -> String {
 	let mut base_conv = String::new();
-	base_conv.push_str("use crate::base_conv::{BaseConv, parse_first_segment, parse_first_segment_pow2, parse_next_segment, parse_next_segment_pow2};\n");
+	base_conv.push_str("use crate::base_conv::{BaseConv, /*parse_first_segment, parse_first_segment_pow2, parse_next_segment, parse_next_segment_pow2*/};\n");
 	base_conv.push_str("use crate::blocks::Limb;\n");
 	base_conv.push_str("use core::num::NonZeroU8;\n");
 	base_conv.push_str("\n");
@@ -83,14 +83,14 @@ fn base_conv() -> String {
 			}
 			base_conv.push_str(&format!("\t\tdigits_per_limb_inv: {},\n", inv));
 
-			base_conv.push_str(&format!(
-				"\t\tparse_first_segment: parse_first_segment_pow2::<{}>,\n",
-				base
-			));
-			base_conv.push_str(&format!(
-				"\t\tparse_next_segment: parse_next_segment_pow2::<{}>,\n",
-				base
-			));
+		//			base_conv.push_str(&format!(
+		//				"\t\tparse_first_segment: parse_first_segment_pow2::<{}>,\n",
+		//				base
+		//			));
+		//			base_conv.push_str(&format!(
+		//				"\t\tparse_next_segment: parse_next_segment_pow2::<{}>,\n",
+		//				base
+		//			));
 		} else {
 			let bits_per_digit_ceil = ((base as f64).log2() * 65536.0).ceil() as usize;
 			let bits_per_digit_floor = ((base as f64).log2() * 65536.0).floor() as usize;
@@ -130,10 +130,10 @@ fn base_conv() -> String {
 				base_conv.push_str(&format!("\t\t// This multiplicative inverse has an inprecision and will add an extra limb for every {} digits\n", cnt));
 			}
 			base_conv.push_str(&format!("\t\tdigits_per_limb_inv: {},\n", inv));
-			base_conv
-				.push_str(&format!("\t\tparse_first_segment: parse_first_segment::<{}>,\n", base));
-			base_conv
-				.push_str(&format!("\t\tparse_next_segment: parse_next_segment::<{}>,\n", base));
+			//			base_conv
+			//				.push_str(&format!("\t\tparse_first_segment: parse_first_segment::<{}>,\n", base));
+			//			base_conv
+			//				.push_str(&format!("\t\tparse_next_segment: parse_next_segment::<{}>,\n", base));
 		}
 		let last_multiple = *multiples.last().unwrap();
 		if last_multiple > LIMB_MAX as u128 {
