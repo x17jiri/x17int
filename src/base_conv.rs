@@ -317,9 +317,9 @@ pub fn digits_to_limbs<const BASE: usize>(
 
 	// first and second limb
 	let mut first_limb = first_limb;
-	let mut second_limb = Limb::zero();
+	let mut second_limb = Limb::ZERO;
 
-	let mut m = Limb::one();
+	let mut m = Limb::ONE;
 	for digit in &digits[..second_limb_digits] {
 		m.val *= BASE as Limb::Value;
 		second_limb.val = second_limb.val * (BASE as Limb::Value) + (*digit as Limb::Value);
@@ -357,7 +357,7 @@ pub fn digits_to_limbs<const BASE: usize>(
 			// So at the end, `len` will be `following_limb_cnt + 2`, which is the capacity of `buf`
 			unsafe { assume(len < buf.len()) };
 
-			let mut limb = Limb::zero();
+			let mut limb = Limb::ZERO;
 			for digit in &digits[..digits_per_limb] {
 				limb.val = limb.val * (BASE as Limb::Value) + (*digit as Limb::Value);
 			}
@@ -420,7 +420,7 @@ pub fn parse_next_segment<const BASE: usize>(segment: &[u8]) -> Limb {
 	} else {
 		// This would be a bug in the code.
 		cold_path();
-		Limb::zero()
+		Limb::ZERO
 	}
 }
 
@@ -441,7 +441,7 @@ pub fn parse_next_segment_pow2<const BASE: usize>(segment: &[u8]) -> Limb {
 	} else {
 		// This would be a bug in the code.
 		cold_path();
-		Limb::zero()
+		Limb::ZERO
 	}
 }
 */

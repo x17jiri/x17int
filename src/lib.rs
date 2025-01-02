@@ -129,7 +129,7 @@ pub struct Int {
 
 impl Int {
 	pub fn new_zero() -> Self {
-		Self::new_inline(ll::Limb::zero(), false)
+		Self::new_inline(ll::Limb::ZERO, false)
 	}
 
 	pub fn new_inline(value: ll::Limb, neg: bool) -> Self {

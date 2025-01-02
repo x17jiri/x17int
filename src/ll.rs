@@ -154,7 +154,7 @@ fn __add_trunc(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> usize {
 		let len;
 		if carry {
 			if rn > an {
-				rp.add(an).write(Limb::one());
+				rp.add(an).write(Limb::ONE);
 				return an.unchecked_add(1);
 			} else {
 				cold_path();
@@ -330,7 +330,7 @@ unsafe fn __mul(
 		let mut re = rp.add(a.len());
 		let be = bp.add(b.len());
 
-		let mut t = blocks::mul_1_unchecked(rp, re, ap, bp.read(), Limb::zero());
+		let mut t = blocks::mul_1_unchecked(rp, re, ap, bp.read(), Limb::ZERO);
 		re.write(t);
 
 		rp = rp.add(1);

@@ -7,22 +7,16 @@ pub struct Limb {
 
 impl Limb {
 	pub type Value = usize;
-	pub const BITS: usize = usize::BITS as usize;
-	pub const MAX: Self::Value = usize::MAX;
-
 	pub type DoubleValue = u128;
+
 	const OK: () =
 		assert!(std::mem::size_of::<Self::DoubleValue>() >= 2 * std::mem::size_of::<Self::Value>());
 
-	#[inline]
-	pub const fn zero() -> Self {
-		Self { val: 0 }
-	}
+	pub const BITS: usize = usize::BITS as usize;
 
-	#[inline]
-	pub const fn one() -> Self {
-		Self { val: 1 }
-	}
+	pub const ZERO: Limb = Self { val: 0 };
+	pub const ONE: Limb = Self { val: 1 };
+	pub const MAX: Limb = Self { val: Limb::Value::MAX };
 
 	#[inline]
 	pub const fn new(val: usize) -> Self {
@@ -59,18 +53,13 @@ impl Limb {
 
 	#[inline]
 	pub fn sum<const N: usize>(a: [Limb; N]) -> [Limb; 2] {
-		let mut t = a[0].val as Limb::DoubleValue;
+		type V = Limb::Value;
+		type D = Limb::DoubleValue;
+		let mut t = a[0].val as D;
 		for i in 1..N {
-			t += a[i].val as Limb::DoubleValue;
+			t += a[i].val as D;
 		}
-		[
-			Limb {
-				val: t as Limb::Value, //
-			},
-			Limb {
-				val: (t >> Limb::BITS) as Limb::Value, //
-			},
-		]
+		[Limb { val: t as V }, Limb { val: (t >> Limb::BITS) as V }]
 	}
 
 	#[inline]
@@ -83,19 +72,10 @@ impl Limb {
 	// result = a * b + c + d
 	#[inline]
 	pub const fn mul(a: Limb, b: Limb, c: Limb, d: Limb) -> [Limb; 2] {
-		let a = a.val as Limb::DoubleValue;
-		let b = b.val as Limb::DoubleValue;
-		let c = c.val as Limb::DoubleValue;
-		let d = d.val as Limb::DoubleValue;
-		let t = a * b + c + d;
-		[
-			Limb {
-				val: t as Limb::Value, //
-			},
-			Limb {
-				val: (t >> Limb::BITS) as Limb::Value, //
-			},
-		]
+		type V = Limb::Value;
+		type D = Limb::DoubleValue;
+		let t = (a.val as D) * (b.val as D) + (c.val as D) + (d.val as D);
+		[Limb { val: t as V }, Limb { val: (t >> Limb::BITS) as V }]
 	}
 }
 
@@ -113,12 +93,9 @@ impl LimbInv {
 		*/
 	#[inline(never)]
 	pub const fn new(divisor: Limb) -> Self {
-		if divisor.val == 0 {
+		if divisor.is_zero() {
 			cold_path();
-			return Self {
-				divisor,
-				inv: [Limb::zero(), Limb::zero()],
-			};
+			return Self { divisor, inv: [Limb::ZERO, Limb::ZERO] };
 		}
 
 		// Let's assume we have 64-bit limbs.
@@ -141,7 +118,7 @@ impl LimbInv {
 
 		type V = Limb::Value;
 		type D = Limb::DoubleValue;
-		const FF: D = Limb::MAX as D;
+		const FF: D = Limb::MAX.val as D;
 		const FF_FF: D = (FF << Limb::BITS) | FF;
 
 		let inv = FF_FF / (divisor.val as D);
@@ -158,7 +135,7 @@ impl LimbInv {
 		type D = Limb::DoubleValue;
 
 		let inv = self.inv;
-		let zero = Limb::zero();
+		let zero = Limb::ZERO;
 
 		// Multiply `a` by `inv`. The result will be 4 limbs `[n0, n1, n2, n3]`.
 		//
@@ -379,7 +356,7 @@ pub unsafe fn add_carry_unchecked(
 				return true;
 			}
 
-			let (sum, overflow) = Limb::addc(ap.read(), Limb::zero(), carry);
+			let (sum, overflow) = Limb::addc(ap.read(), Limb::ZERO, carry);
 			rp.write(sum);
 			carry = overflow;
 
@@ -407,7 +384,7 @@ pub unsafe fn neg_add_carry_unchecked(
 				return true;
 			}
 
-			let (sum, overflow) = Limb::addc(ap.add(i).read().bit_neg(), Limb::zero(), carry);
+			let (sum, overflow) = Limb::addc(ap.add(i).read().bit_neg(), Limb::ZERO, carry);
 			rp.add(i).write(sum);
 			carry = overflow;
 
@@ -440,7 +417,7 @@ pub unsafe fn add_carry_unchecked_(rp: *mut Limb, re: *mut Limb, carry: bool) ->
 				return true;
 			}
 
-			let (sum, overflow) = Limb::addc(rp.read(), Limb::zero(), carry);
+			let (sum, overflow) = Limb::addc(rp.read(), Limb::ZERO, carry);
 			rp.write(sum);
 			carry = overflow;
 
@@ -505,7 +482,7 @@ pub unsafe fn sub_borrow_unchecked(
 				break;
 			}
 
-			let (diff, underflow) = Limb::subb(ap.read(), Limb::zero(), borrow);
+			let (diff, underflow) = Limb::subb(ap.read(), Limb::ZERO, borrow);
 			rp.write(diff);
 			borrow = underflow;
 
@@ -544,7 +521,7 @@ pub unsafe fn mul_1_unchecked(
 
 		let mut carry = c;
 		while rp != re {
-			let [lo, hi] = Limb::mul(ap.read(), b, carry, Limb::zero());
+			let [lo, hi] = Limb::mul(ap.read(), b, carry, Limb::ZERO);
 			rp.write(lo);
 			carry = hi;
 
@@ -563,7 +540,7 @@ pub unsafe fn mul_1_unchecked_(rp: *mut Limb, re: *mut Limb, b: Limb, c: Limb) -
 
 		let mut carry = c;
 		while rp != re {
-			let [lo, hi] = Limb::mul(rp.read(), b, carry, Limb::zero());
+			let [lo, hi] = Limb::mul(rp.read(), b, carry, Limb::ZERO);
 			rp.write(lo);
 			carry = hi;
 
@@ -584,7 +561,7 @@ pub unsafe fn addmul_1_unchecked(rp: *mut Limb, re: *mut Limb, ap: *const Limb, 
 		let mut rp = rp;
 		let mut ap = ap;
 
-		let mut carry = Limb::zero();
+		let mut carry = Limb::ZERO;
 		while rp != re {
 			let [lo, hi] = Limb::mul(ap.read(), b, carry, rp.read());
 			rp.write(lo);
@@ -830,9 +807,9 @@ mod tests {
 	#[test]
 	fn test1() {
 		let inv = LimbInv::new(Limb::new(10_000_000_000_000_000_000));
-		let a = Limb::MAX;
+		let a = Limb::MAX.val;
 		let b = 700_000;
-		let c = Limb::mul(Limb::new(a), Limb::new(b), Limb::zero(), Limb::zero());
+		let c = Limb::mul(Limb::new(a), Limb::new(b), Limb::ZERO, Limb::ZERO);
 		let (q, r) = inv.mul(c);
 		println!("q = {:?}, r = {:?}", q, r);
 	}
