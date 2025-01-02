@@ -157,35 +157,41 @@ impl LimbInv {
 		type V = Limb::Value;
 		type D = Limb::DoubleValue;
 
-		let a0 = a[0];
-		let a1 = a[1];
-		let inv0 = self.inv[0];
-		let inv1 = self.inv[1];
+		let inv = self.inv;
 		let zero = Limb::zero();
 
-		let [m0, m1] = Limb::mul(a0, inv0, zero, zero);
-		let [m1, m2] = Limb::mul(a0, inv1, m1, zero);
+		// Multiply `a` by `inv`. The result will be 4 limbs `[n0, n1, n2, n3]`.
+		//
+		// The two highest limbs are the quotient: `q = [n2, n3]`.
+
+		let [m0, m1] = Limb::mul(a[0], inv[0], zero, zero);
+		let [m1, m2] = Limb::mul(a[0], inv[1], m1, zero);
 
 		let _n0 = m0;
-		let [_n1, n2] = Limb::mul(a1, inv0, zero, m1);
-		let [n2, n3] = Limb::mul(a1, inv1, n2, m2);
+		let [_n1, n2] = Limb::mul(a[1], inv[0], zero, m1);
+		let [n2, n3] = Limb::mul(a[1], inv[1], n2, m2);
 
-		let q0a = n2;
-		let q1a = n3;
+		let q = ((n3.val as D) << Limb::BITS) | (n2.val as D);
 
-		let qa = ((q1a.val as D) << Limb::BITS) | (q0a.val as D);
-		let t = (self.divisor.val as D).wrapping_mul(qa);
-		let a = ((a1.val as D) << Limb::BITS) | (a0.val as D);
-		let r = a.wrapping_sub(t);
+		// The calculated quotient may be one less than the actual quotient.
+		// Calculate the remainder and if it is greater than the divisor, make a correction.
 
-		let correction = r >= (self.divisor.val as D);
+		let a = ((a[1].val as D) << Limb::BITS) | (a[0].val as D);
+		let check = q.wrapping_mul(self.divisor.val as D);
+		let rem = a.wrapping_sub(check);
 
-		let r = (r as V).wrapping_sub(if correction { self.divisor.val } else { 0 });
+		let correction = rem >= (self.divisor.val as D);
 
-		let (q0b, c) = Limb::addc(n2, zero, correction);
-		let (q1b, _) = Limb::addc(n3, zero, c);
+		// correct the remainder if needed
+		let original_rem = rem as V;
+		let corrected_rem = original_rem.wrapping_sub(self.divisor.val);
+		let rem = if correction { corrected_rem } else { original_rem };
 
-		([q0b, q1b], Limb { val: r })
+		// correct the quotient if needed
+		let (q0, carry) = Limb::addc(n2, zero, correction);
+		let (q1, _) = Limb::addc(n3, zero, carry);
+
+		([q0, q1], Limb { val: rem })
 	}
 }
 
