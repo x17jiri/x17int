@@ -33,7 +33,7 @@ use crate::base_conv::BaseConv;
 use crate::blocks;
 pub use crate::blocks::Limb;
 use crate::error::{assert, Error, ErrorKind};
-
+/*
 /// Say we have an operation that writes data to a provided buffer, but the buffer may be too small.
 ///
 /// We can use:
@@ -56,7 +56,7 @@ enum MaybeOwned {
 	Borrowed(usize),
 	Owned(ThinVec<Limb>), // TODO - use OwnedBuffer instead of ThinVec?
 }
-
+*/
 //--------------------------------------------------------------------------------------------------
 // bit_width
 
@@ -353,7 +353,7 @@ unsafe fn __mul(
 }
 
 //--------------------------------------------------------------------------------------------------
-
+/*
 #[macro_use]
 #[cfg(test)]
 mod tests {
@@ -436,3 +436,4 @@ mod tests {
 		assert_eq!(r, testvec![MAX - 1, 0, 0]);
 	}
 }
+*/

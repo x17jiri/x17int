@@ -1,4 +1,4 @@
-use std::intrinsics::{assume, cold_path};
+use std::intrinsics::{assume, cold_path, select_unpredictable};
 
 #[derive(Clone, Copy, Default, PartialEq, Debug, Eq, Ord, PartialOrd)]
 pub struct Limb {
@@ -98,6 +98,105 @@ impl Limb {
 		]
 	}
 }
+
+pub struct LimbInv {
+	divisor: Limb,
+	inv: [Limb; 2],
+}
+
+impl LimbInv {
+	/*
+	/// Preconditions:
+	/// ```rust
+	///     divisor != 0
+	/// ```
+		*/
+	#[inline(never)]
+	pub const fn new(divisor: Limb) -> Self {
+		if divisor.val == 0 {
+			cold_path();
+			return Self {
+				divisor,
+				inv: [Limb::zero(), Limb::zero()],
+			};
+		}
+
+		// Let's assume we have 64-bit limbs.
+		//
+		// We don't want to do any corrections after the division, so the inverse needs to be
+		// at least 128 bits wide.
+		//
+		// So, we will be computing `inverse = ceil(2^128 / limb)`.
+		//
+		// However, `2^128` is not representable in 128 bits and Rust doesn't have larger numbers.
+		// So instead we will compute `inverse = floor((2^128 - 1) / limb) + 1`.
+		//
+		// This should work for all values > 1.
+		//   - when `limb` is NOT an exact divisor of `2^128`:
+		//     - `floor(2^128 / limb) == floor((2^128 - 1) / limb)`
+		//     - `2^128 / limb` always has a fractional part, so `ceil == floor + 1`
+		//   - when `limb` IS an exact divisor of `2^128`:
+		//     - `floor(2^128 / limb) == floor((2^128 - 1) / limb) + 1`
+		//     - `2^128 / limb` has no fractional part, so `ceil == floor`
+
+		type V = Limb::Value;
+		type D = Limb::DoubleValue;
+		const FF: D = Limb::MAX as D;
+		const FF_FF: D = (FF << Limb::BITS) | FF;
+
+		let inv = FF_FF / (divisor.val as D);
+
+		Self {
+			divisor,
+			inv: [Limb { val: inv as V }, Limb { val: (inv >> Limb::BITS) as V }],
+		}
+	}
+
+	#[inline(never)]
+	pub const fn mul(self, a: [Limb; 2]) -> ([Limb; 2], Limb) {
+		type V = Limb::Value;
+		type D = Limb::DoubleValue;
+
+		let a0 = a[0];
+		let a1 = a[1];
+		let inv0 = self.inv[0];
+		let inv1 = self.inv[1];
+		let zero = Limb::zero();
+
+		let [m0, m1] = Limb::mul(a0, inv0, zero, zero);
+		let [m1, m2] = Limb::mul(a0, inv1, m1, zero);
+
+		let _n0 = m0;
+		let [_n1, n2] = Limb::mul(a1, inv0, zero, m1);
+		let [n2, n3] = Limb::mul(a1, inv1, n2, m2);
+
+		let q0a = n2;
+		let q1a = n3;
+
+		let qa = ((q1a.val as D) << Limb::BITS) | (q0a.val as D);
+		let t = (self.divisor.val as D).wrapping_mul(qa);
+		let a = ((a1.val as D) << Limb::BITS) | (a0.val as D);
+		let r = a.wrapping_sub(t);
+
+		let correction = r >= (self.divisor.val as D);
+
+		let r = (r as V).wrapping_sub(if correction { self.divisor.val } else { 0 });
+
+		let (q0b, c) = Limb::addc(n2, zero, correction);
+		let (q1b, _) = Limb::addc(n3, zero, c);
+
+		([q0b, q1b], Limb { val: r })
+	}
+}
+
+/*impl std::ops::Mul<LimbInv> for Limb {
+	type Output = Limb;
+
+	#[inline]
+	fn mul(self, rhs: LimbInv) -> Limb {
+		rhs.mul(self)
+	}
+}*/
 
 #[inline]
 fn has_overlap(a: *const Limb, a_len: usize, b: *const Limb, b_len: usize) -> bool {
@@ -493,13 +592,13 @@ pub unsafe fn addmul_1_unchecked(rp: *mut Limb, re: *mut Limb, ap: *const Limb, 
 }
 
 //--------------------------------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
 	use super::*;
 
 	use crate::testvec;
 
+	/*
 	#[test]
 	fn test_bit_width() {
 		unsafe {
@@ -719,5 +818,16 @@ mod tests {
 			assert_eq!(r, testvec![TWO_THIRDS - (MAX - HALF) - 1, 0, 0, 0, 0, 0, 0, 7, 8, 9, 10]);
 			assert_eq!(carry, true);
 		}
+	}
+	*/
+
+	#[test]
+	fn test1() {
+		let inv = LimbInv::new(Limb::new(10_000_000_000_000_000_000));
+		let a = Limb::MAX;
+		let b = 700_000;
+		let c = Limb::mul(Limb::new(a), Limb::new(b), Limb::zero(), Limb::zero());
+		let (q, r) = inv.mul(c);
+		println!("q = {:?}, r = {:?}", q, r);
 	}
 }

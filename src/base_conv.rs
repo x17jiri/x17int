@@ -7,6 +7,7 @@ use core::num::NonZeroU8;
 use smallvec::{Array, SmallVec};
 use std::fmt::DebugList;
 use std::intrinsics::{assume, cold_path};
+use std::num::NonZeroUsize;
 
 #[derive(Copy, Clone, Debug)]
 pub struct BaseConv {
@@ -205,19 +206,25 @@ impl BaseConv {
 	}*/
 }
 
-const fn digits_per_limb(base: usize) -> usize {
+const fn digits_per_limb(base: usize) -> (usize, Limb) {
 	let mut m = base as Limb::DoubleValue;
+	let mut big_base = m;
 	let mut digits_per_limb = 1;
-	while m <= ((1 as Limb::DoubleValue) << Limb::BITS) {
+	loop {
 		m *= base as Limb::DoubleValue;
+		if m > ((1 as Limb::DoubleValue) << Limb::BITS) {
+			break;
+		}
+
+		big_base = m;
 		digits_per_limb += 1;
 	}
-	digits_per_limb
+	(digits_per_limb, Limb { val: big_base as Limb::Value })
 }
 
 #[inline(never)]
 pub fn parse_short<const BASE: usize>(bytes: &[u8], mapping: &[i8; 256]) -> (Limb, usize) {
-	let digits_per_limb = const { digits_per_limb(BASE) };
+	let (digits_per_limb, _big_base) = const { digits_per_limb(BASE) };
 	let split = digits_per_limb.min(bytes.len());
 
 	// For the first `digits_per_limb` digits, we don't have to check for overflow
@@ -278,7 +285,12 @@ pub fn parse_digits<const BASE: usize>(
 pub fn digits_to_limbs<const BASE: usize>(
 	digits: &[u8], first_limb: Limb, limbs: &mut [Limb],
 ) -> Result<(Option<LimbBuf>, usize), Error> {
-	let digits_per_limb = const { digits_per_limb(BASE) };
+	/*	let big_base_inv = const {
+		let (_, big_base) = digits_per_limb(BASE);
+		blocks::LimbInv::new(big_base)
+	};*/
+
+	let (digits_per_limb, _) = const { digits_per_limb(BASE) };
 	debug_assert!(digits_per_limb == BASE_CONV[BASE].multiples.len());
 
 	if digits.is_empty() {
@@ -308,24 +320,27 @@ pub fn digits_to_limbs<const BASE: usize>(
 	let mut second_limb = Limb::zero();
 
 	let mut m = Limb::one();
-	for _ in 0..(digits_per_limb - second_limb_digits) {
-		let digit = first_limb.val % (BASE as Limb::Value);
-		first_limb.val /= BASE as Limb::Value;
-
-		second_limb.val += digit * m.val;
-		m.val *= BASE as Limb::Value;
-	}
-
-	let mut m = Limb::one();
 	for digit in &digits[..second_limb_digits] {
 		m.val *= BASE as Limb::Value;
 		second_limb.val = second_limb.val * (BASE as Limb::Value) + (*digit as Limb::Value);
 	}
 
+	// combine first and second limb into one big number
+	type V = Limb::Value;
+	type D = Limb::DoubleValue;
+	let d = (first_limb.val as D) * (m.val as D) + (second_limb.val as D);
+	// split the big number into two limbs by dividing it by `big_base`
+	/*	let d_lo = Limb { val: d as V };
+	let d_hi = Limb { val: (d >> Limb::BITS) as V };
+	let t = d_lo * big_base_inv;
+	let first_limb = (d / (big_base.val as D)) as Limb::Value;
+	second_limb.val = (d % (big_base.val as D)) as Limb::Value;
+
 	buf[0] = first_limb;
 	let mut len = first_limb.is_not_zero() as usize;
 	buf[len] = second_limb;
-	len += second_limb.is_not_zero() as usize;
+	len += second_limb.is_not_zero() as usize;*/
+	let mut len = 0;
 
 	// rest of the limbs
 	if following_limb_cnt > 0 {
