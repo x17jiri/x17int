@@ -142,9 +142,11 @@ impl LimbInv {
 
 		let a = ((a[1].val as D) << Limb::BITS) | (a[0].val as D);
 
-		// The result needs to fit into a single limb, so `a` needs to have at least as many
-		// leading zeros as the divisor. So this shift should not overflow.
+		// Help the compiler figure out that `shift < Limb::BITS`
 		let shift = (self.shift as usize) & (Limb::BITS - 1);
+
+		// The result needs to fit into a single limb, so `a` needs to have at least
+		// as many leading zeros as the divisor. So this shift should not overflow.
 		let a_shifted = a << shift;
 		debug_assert!(a >> (2 * Limb::BITS - shift) == 0);
 
@@ -154,17 +156,21 @@ impl LimbInv {
 		let inv = self.inv;
 		let zero = Limb::ZERO;
 
-		// Multiply `a` by `inv`. The result will be 4 limbs `[n0, n1, n2, n3]`.
+		// Multiply `a` by the inverted divisor.
+		// `a` is 2 limbs and the inversion is also 2 limbs. Low limb of the inversion is `inv`.
+		// High limb of the inversion is always 1 so we don't need to store it.
 		//
-		// The two highest limbs are the quotient: `q = [n2, n3]`.
+		// In theory, the result of the multiplication will be 4 limbs `[m0, m1, m2, m3]`,
+		// where the two highest limbs are the quotient: `q = [m2, m3]`.
+		//
+		// However, one of our preconditions is that the quotient fits in a single limb,
+		// so `m3` should always be zero.
 
-		let [_m0, m1] = Limb::mul(x0, inv, zero, zero);
-		let [_m1, m2] = Limb::mul(x1, inv, x0, m1);
-		let (m2, carry) = Limb::addc(m2, x1, false);
+		let [_m0, c1] = Limb::mul(x0, inv, zero, zero);
+		let [_m1, c2] = Limb::mul(x1, inv, x0, c1);
+		let (m2, m3) = Limb::addc(x1, c2, false);
 
-		// The result should fit into a single limb, so there should be no carry.
-		debug_assert!(!carry);
-
+		debug_assert!(!m3);
 		let q = m2.val;
 
 		// The calculated quotient may be one less than the actual quotient.
@@ -186,15 +192,6 @@ impl LimbInv {
 		(Limb { val: q }, Limb { val: rem })
 	}
 }
-
-/*impl std::ops::Mul<LimbInv> for Limb {
-	type Output = Limb;
-
-	#[inline]
-	fn mul(self, rhs: LimbInv) -> Limb {
-		rhs.mul(self)
-	}
-}*/
 
 #[inline]
 fn has_overlap(a: *const Limb, a_len: usize, b: *const Limb, b_len: usize) -> bool {
