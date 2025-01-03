@@ -81,7 +81,8 @@ impl Limb {
 
 pub struct LimbInv {
 	divisor: Limb,
-	inv: [Limb; 2],
+	shift: u16,
+	inv: Limb,
 }
 
 impl LimbInv {
@@ -95,7 +96,7 @@ impl LimbInv {
 	pub const fn new(divisor: Limb) -> Self {
 		if divisor.is_zero() {
 			cold_path();
-			return Self { divisor, inv: [Limb::ZERO, Limb::ZERO] };
+			return Self { divisor, shift: 0, inv: Limb::ZERO };
 		}
 
 		// Let's assume we have 64-bit limbs.
@@ -116,23 +117,39 @@ impl LimbInv {
 		//     - `floor(2^128 / limb) == floor((2^128 - 1) / limb) + 1`
 		//     - `2^128 / limb` has no fractional part, so `ceil == floor`
 
+		let shift = divisor.val.leading_zeros() as u16;
+		let normalized_divisor = divisor.val << shift;
+
 		type V = Limb::Value;
 		type D = Limb::DoubleValue;
 		const FF: D = Limb::MAX.val as D;
 		const FF_FF: D = (FF << Limb::BITS) | FF;
 
-		let inv = FF_FF / (divisor.val as D);
+		let inv = FF_FF / (normalized_divisor as D);
+		debug_assert!(inv >> Limb::BITS == 1);
 
 		Self {
 			divisor,
-			inv: [Limb { val: inv as V }, Limb { val: (inv >> Limb::BITS) as V }],
+			shift,
+			inv: Limb { val: inv as V },
 		}
 	}
 
 	#[inline(never)]
-	pub const fn mul(self, a: [Limb; 2]) -> ([Limb; 2], Limb) {
+	pub const fn mul(self, a: [Limb; 2]) -> (Limb, Limb) {
 		type V = Limb::Value;
 		type D = Limb::DoubleValue;
+
+		let a = ((a[1].val as D) << Limb::BITS) | (a[0].val as D);
+
+		// The result needs to fit into a single limb, so `a` needs to have at least as many
+		// leading zeros as the divisor. So this shift should not overflow.
+		let shift = (self.shift as usize) & (Limb::BITS - 1);
+		let a_shifted = a << shift;
+		debug_assert!(a >> (2 * Limb::BITS - shift) == 0);
+
+		let x0 = Limb { val: a_shifted as V };
+		let x1 = Limb { val: (a_shifted >> Limb::BITS) as V };
 
 		let inv = self.inv;
 		let zero = Limb::ZERO;
@@ -141,34 +158,32 @@ impl LimbInv {
 		//
 		// The two highest limbs are the quotient: `q = [n2, n3]`.
 
-		let [m0, m1] = Limb::mul(a[0], inv[0], zero, zero);
-		let [m1, m2] = Limb::mul(a[0], inv[1], m1, zero);
+		let [_m0, m1] = Limb::mul(x0, inv, zero, zero);
+		let [_m1, m2] = Limb::mul(x1, inv, x0, m1);
+		let (m2, carry) = Limb::addc(m2, x1, false);
 
-		let _n0 = m0;
-		let [_n1, n2] = Limb::mul(a[1], inv[0], zero, m1);
-		let [n2, n3] = Limb::mul(a[1], inv[1], n2, m2);
+		// The result should fit into a single limb, so there should be no carry.
+		debug_assert!(!carry);
 
-		let q = ((n3.val as D) << Limb::BITS) | (n2.val as D);
+		let q = m2.val;
 
 		// The calculated quotient may be one less than the actual quotient.
 		// Calculate the remainder and if it is greater than the divisor, make a correction.
 
-		let a = ((a[1].val as D) << Limb::BITS) | (a[0].val as D);
-		let check = q.wrapping_mul(self.divisor.val as D);
+		let check = (q as D) * (self.divisor.val as D);
 		let rem = a.wrapping_sub(check);
 
-		let correction = rem >= (self.divisor.val as D);
+		let need_correction = rem >= (self.divisor.val as D);
 
 		// correct the remainder if needed
 		let original_rem = rem as V;
 		let corrected_rem = original_rem.wrapping_sub(self.divisor.val);
-		let rem = if correction { corrected_rem } else { original_rem };
+		let rem = if need_correction { corrected_rem } else { original_rem };
 
 		// correct the quotient if needed
-		let (q0, carry) = Limb::addc(n2, zero, correction);
-		let (q1, _) = Limb::addc(n3, zero, carry);
+		let q = q + (need_correction as V);
 
-		([q0, q1], Limb { val: rem })
+		(Limb { val: q }, Limb { val: rem })
 	}
 }
 
@@ -806,11 +821,11 @@ mod tests {
 
 	#[test]
 	fn test1() {
-		let inv = LimbInv::new(Limb::new(10_000_000_000_000_000_000));
+		let inv = LimbInv::new(Limb::new(1_000_000_000_000_000_000));
 		let a = Limb::MAX.val;
 		let b = 700_000;
 		let c = Limb::mul(Limb::new(a), Limb::new(b), Limb::ZERO, Limb::ZERO);
-		let (q, r) = inv.mul(c);
+		let (q, r) = inv.mul(c); //[Limb::new(a), Limb::new(b)]);
 		println!("q = {:?}, r = {:?}", q, r);
 	}
 }

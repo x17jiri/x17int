@@ -6,13 +6,14 @@
 #![feature(slice_ptr_get)]
 #![feature(let_chains)]
 #![feature(ptr_sub_ptr)]
+#![feature(ptr_as_ref_unchecked)]
+#![feature(unchecked_shifts)]
 //
 #![allow(non_snake_case)]
 #![allow(unused_imports)]
 #![allow(internal_features)]
 #![allow(incomplete_features)]
 //
-#![feature(ptr_as_ref_unchecked)]
 
 use core::panic;
 use smallvec::SmallVec;
