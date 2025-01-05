@@ -141,7 +141,7 @@ impl LimbInv {
 		let m: D = (q1 as D) * (normalized_divisor as D);
 		let fix: V = (m >> 95) as V; // 1 if we need a fix, 0 otherwise
 		let q1: V = q1 - fix;
-		let m = if fix != 0 { m - (normalized_divisor as D) } else { m };
+		let m: D = if fix != 0 { m - (normalized_divisor as D) } else { m };
 		let rem97 = !(m << 33); // this is equivalent to: divident - (m << 33)
 
 		// Verify that 'q1' and 'rem97' are correct.
@@ -150,49 +150,43 @@ impl LimbInv {
 
 		//==== Calculate `q2` - the next 32 bits of the quotient ====
 
-		// At the moment, the reminder may be up to 97 bits wide. So we need to do 65-bit by 33-bit
-		// division. For this, we will calculate 65-bit inversion:
+		// At the moment, the reminder may be up to 97 bits wide. So we need to do
+		// 65-bit by 33-bit division. For this, we will calculate 65-bit inversion:
 		//     inv65 = floor((2**65 - 1) / nd33)
-		// We already have `q1 = floor((2**64 - 1) / nd33)`.
-		// To get `inv65`, we just need a few adjustments.
+		// We already have `q1 = floor((2**64 - 1) / nd33)`. To get `inv65`,
+		// we just need a few adjustments.
 		let inv65: V = (q1 << 1) | ((2 * mod1 + 1) >= nd33) as V;
 
 		// Make an estimate of `q2` based on the highest 33 bits of the normalized divisor.
 		// The estimate may be one too large.
-		let num: V = (rem97 >> 32) as V;
-		let q2: V = (((num as D) * (inv65 as D)) >> 65) as V;
+		let num: V = (rem97 >> 32) as V; //////////////////////////////////// TODO - needs to be `D`
+		let q2: D = (num as D) * (inv65 as D) + (TODO);
+		let q2: V = (q2 >> 65) as V;
+
+		// correction 1
 		let m: V = q2 * nd33;
-		let fix = (num - m >= nd33) as V;
-		let q2 = q2 + fix;
+		let fix = num - m >= nd33;
+		let q2: V = q2 + (fix as V);
 
-		let m = (q2 as D) * (normalized_divisor as D);
+		// correction 2
+		let m: D = (q2 as D) * (normalized_divisor as D);
 		let (rem64, fix) = rem97.overflowing_sub(m << 1);
-
-		let q2 = q2 - (fix as V);
+		let q2: V = q2 - (fix as V);
 		let rem64 = rem64.wrapping_add(if fix { normalized_divisor as D } else { 0 });
 
+		// Verify that 'q2' and 'rem64' are correct.
 		let check_q2 = rem97 / ((normalized_divisor as D) << 1);
 		let check_rem64 = rem97 % ((normalized_divisor as D) << 1);
 		debug_assert!(q2 as D == check_q2);
 		debug_assert!(rem64 == check_rem64);
 
-		//
-		//
-		// Divide `rem97 / (normalized_divisor << 1)`
-		// We will make the first estimate of this division by dividing 65 bits of rem97 by 33 bits
-		// of the normalized divisor. The result of dividing 65 bits by 33 bits can be up to 33 bits
-		// wide. However, we know that the estimate may be one too large and the real quotient will
-		// fit into 32 bits. So if we notice the 33rd bit is set, we can assume that the estimated
-		// quotient is `2**32` and the real quotient is `2**32 - 1`.
-		//
-		//
+		//==== Calculate the lowest bit ====
 
-		//
 		let bit0 = (rem64 as V) >= normalized_divisor;
 
-		//
-		let inv = (q1 << 33) | (div2 << 1) | (bit0 as V);
+		//==== Put everything together ====
 
+		let inv = (q1 << 33) | (q2 << 1) | (bit0 as V);
 		debug_assert!(expected_inv as V == inv);
 
 		Self { divisor, shift, inv: Limb { val: inv } }
