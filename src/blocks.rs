@@ -1,4 +1,7 @@
-use std::intrinsics::{assume, cold_path, select_unpredictable};
+use std::{
+	intrinsics::{assume, cold_path, select_unpredictable},
+	num::NonZeroUsize,
+};
 
 #[derive(Clone, Copy, Default, PartialEq, Debug, Eq, Ord, PartialOrd)]
 pub struct Limb {
@@ -86,53 +89,117 @@ pub struct LimbInv {
 }
 
 impl LimbInv {
-	/*
-	/// Preconditions:
-	/// ```rust
-	///     divisor != 0
-	/// ```
-		*/
-	#[inline(never)]
 	pub const fn new(divisor: Limb) -> Self {
 		if divisor.is_zero() {
 			cold_path();
 			return Self { divisor, shift: 0, inv: Limb::ZERO };
 		}
 
-		// Let's assume we have 64-bit limbs.
-		//
-		// We don't want to do any corrections after the division, so the inverse needs to be
-		// at least 128 bits wide.
-		//
-		// So, we will be computing `inverse = ceil(2^128 / limb)`.
-		//
-		// However, `2^128` is not representable in 128 bits and Rust doesn't have larger numbers.
-		// So instead we will compute `inverse = floor((2^128 - 1) / limb) + 1`.
-		//
-		// This should work for all values > 1.
-		//   - when `limb` is NOT an exact divisor of `2^128`:
-		//     - `floor(2^128 / limb) == floor((2^128 - 1) / limb)`
-		//     - `2^128 / limb` always has a fractional part, so `ceil == floor + 1`
-		//   - when `limb` IS an exact divisor of `2^128`:
-		//     - `floor(2^128 / limb) == floor((2^128 - 1) / limb) + 1`
-		//     - `2^128 / limb` has no fractional part, so `ceil == floor`
-
-		let shift = divisor.val.leading_zeros() as u16;
-		let normalized_divisor = divisor.val << shift;
-
 		type V = Limb::Value;
 		type D = Limb::DoubleValue;
-		const FF: D = Limb::MAX.val as D;
-		const FF_FF: D = (FF << Limb::BITS) | FF;
 
-		let inv = FF_FF / (normalized_divisor as D);
-		debug_assert!(inv >> Limb::BITS == 1);
+		// For 64 bit limb, the double inverse is calculated as:
+		//
+		//     inv = floor((2^128 - 1) / divisor)
+		//
+		// If the divisor is normalized (i.e. the highest bit is set), the inverse will be 65 bits
+		// wide. We only store the low 64 bits. We don't need to store bit 65 because it is always 1.
 
-		Self {
-			divisor,
-			shift,
-			inv: Limb { val: inv as V },
-		}
+		// Left-shift the divisor to remove all leading zeros.
+		// We will shift the dividend by the same amount, so the result will be unaffected.
+		let shift = divisor.val.leading_zeros() as u16;
+		let normalized_divisor = divisor.val << shift;
+		unsafe { assume(normalized_divisor != 0) };
+
+		// `nd33` is the normalized divisor shifted right by 31 bits.
+		// So it has 31 leading zeros and its bith width is 33 bits.
+		let nd33: V = normalized_divisor >> 31;
+		unsafe { assume(nd33 != 0) };
+
+		// The dividend is `2**128 - 1`.
+		let divident = ((Limb::MAX.val as D) << Limb::BITS) | (Limb::MAX.val as D);
+
+		// Calculate the inverse using u128 division. This value will only be used in debug mode
+		// to verify the correctness of the optimized calculation.
+		let expected_inv: D = divident / (normalized_divisor as D);
+		debug_assert!(expected_inv >> Limb::BITS == 1);
+
+		//==== Calculate `q1` - the highest 32 bits of the quotient ====
+
+		// These values are used to verify the correctness of the optimized calculation.
+		let expected_q1: D = divident / ((normalized_divisor as D) << 33);
+		let expected_rem97: D = divident % ((normalized_divisor as D) << 33);
+
+		// Make an estimate of `q1` based on the highest 33 bits of the normalized divisor.
+		// By using more than 32 bits, we know the estimate will be at most one too large.
+		let q1: V = Limb::MAX.val / nd33;
+		let mod1: V = Limb::MAX.val % nd33;
+
+		// Fix the estimate if needed, i.e., if `q1 * (normalized_divisor << 33) > divident`.
+		// Since the divident is maximal 128-bit number, the test `multiplication > divident`,
+		// is true if the multiplication has 1 more bit.
+		let m: D = (q1 as D) * (normalized_divisor as D);
+		let fix: V = (m >> 95) as V; // 1 if we need a fix, 0 otherwise
+		let q1: V = q1 - fix;
+		let m = if fix != 0 { m - (normalized_divisor as D) } else { m };
+		let rem97 = !(m << 33); // this is equivalent to: divident - (m << 33)
+
+		// Verify that 'q1' and 'rem97' are correct.
+		debug_assert!(q1 as D == expected_q1);
+		debug_assert!(rem97 == expected_rem97);
+
+		//==== Calculate `q2` - the next 32 bits of the quotient ====
+
+		// At the moment, the reminder may be up to 97 bits wide. So we need to do 65-bit by 33-bit
+		// division. For this, we will calculate 65-bit inversion:
+		//     inv65 = floor((2**65 - 1) / nd33)
+		// We already have `q1 = floor((2**64 - 1) / nd33)`.
+		// To get `inv65`, we just need a few adjustments.
+		let inv65: V = (q1 << 1) | ((2 * mod1 + 1) >= nd33) as V;
+
+		// Make an estimate of `q2` based on the highest 33 bits of the normalized divisor.
+		// The estimate may be one too large.
+		let num: V = (rem97 >> 32) as V;
+		let q2: V = (((num as D) * (inv65 as D)) >> 65) as V;
+		let m: V = q2 * nd33;
+		let fix = (num - m >= nd33) as V;
+		let q2 = q2 + fix;
+
+		let m = (q2 as D) * (normalized_divisor as D);
+		let (rem64, fix) = rem97.overflowing_sub(m << 1);
+
+		let q2 = q2 - (fix as V);
+		let rem64 = rem64.wrapping_add(if fix { normalized_divisor as D } else { 0 });
+
+		let check_q2 = rem97 / ((normalized_divisor as D) << 1);
+		let check_rem64 = rem97 % ((normalized_divisor as D) << 1);
+		debug_assert!(q2 as D == check_q2);
+		debug_assert!(rem64 == check_rem64);
+
+		//
+		//
+		// Divide `rem97 / (normalized_divisor << 1)`
+		// We will make the first estimate of this division by dividing 65 bits of rem97 by 33 bits
+		// of the normalized divisor. The result of dividing 65 bits by 33 bits can be up to 33 bits
+		// wide. However, we know that the estimate may be one too large and the real quotient will
+		// fit into 32 bits. So if we notice the 33rd bit is set, we can assume that the estimated
+		// quotient is `2**32` and the real quotient is `2**32 - 1`.
+		//
+		//
+
+		//
+		let bit0 = (rem64 as V) >= normalized_divisor;
+
+		//
+		let inv = (q1 << 33) | (div2 << 1) | (bit0 as V);
+
+		debug_assert!(expected_inv as V == inv);
+
+		Self { divisor, shift, inv: Limb { val: inv } }
+	}
+
+	pub const fn is_valid(&self) -> bool {
+		self.divisor.is_not_zero()
 	}
 
 	#[inline(never)]
@@ -182,14 +249,13 @@ impl LimbInv {
 		let need_correction = rem >= (self.divisor.val as D);
 
 		// correct the remainder if needed
-		let original_rem = rem as V;
-		let corrected_rem = original_rem.wrapping_sub(self.divisor.val);
-		let rem = if need_correction { corrected_rem } else { original_rem };
+		let corrected_rem = rem.wrapping_sub(self.divisor.val as D);
+		let rem = if need_correction { corrected_rem } else { rem };
 
 		// correct the quotient if needed
 		let q = q + (need_correction as V);
 
-		(Limb { val: q }, Limb { val: rem })
+		(Limb { val: q }, Limb { val: rem as V })
 	}
 }
 

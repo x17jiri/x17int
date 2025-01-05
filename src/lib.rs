@@ -8,12 +8,13 @@
 #![feature(ptr_sub_ptr)]
 #![feature(ptr_as_ref_unchecked)]
 #![feature(unchecked_shifts)]
+#![feature(const_eval_select)]
 //
 #![allow(non_snake_case)]
 #![allow(unused_imports)]
 #![allow(internal_features)]
 #![allow(incomplete_features)]
-//
+#![allow(non_upper_case_globals)] //
 
 use core::panic;
 use smallvec::SmallVec;
