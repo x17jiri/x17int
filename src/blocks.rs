@@ -139,10 +139,10 @@ impl LimbInv {
 		// Since the divident is maximal 128-bit number, the test `multiplication > divident`,
 		// is true if the multiplication has 1 more bit.
 		let m: D = (q1 as D) * (normalized_divisor as D);
-		let fix: V = (m >> 95) as V; // 1 if we need a fix, 0 otherwise
-		let q1: V = q1 - fix;
-		let m: D = if fix != 0 { m - (normalized_divisor as D) } else { m };
-		let rem97 = !(m << 33); // this is equivalent to: divident - (m << 33)
+		let fix_needed: V = (m >> 95) as V; // 1 if we need a fix, 0 otherwise
+		let q1: V = q1 - fix_needed;
+		let m: D = if fix_needed != 0 { m - (normalized_divisor as D) } else { m };
+		let rem97 = !(m << 33); // this is equivalent to: `rem97 = divident - (m << 33)`
 
 		// Verify that 'q1' and 'rem97' are correct.
 		debug_assert!(q1 as D == expected_q1);
@@ -156,23 +156,26 @@ impl LimbInv {
 		// We already have `q1 = floor((2**64 - 1) / nd33)`. To get `inv65`,
 		// we just need a few adjustments.
 		let inv65: V = (q1 << 1) | ((2 * mod1 + 1) >= nd33) as V;
+		//let inv65: V = (q1 << 1) | (mod1 >= (nd33 >> 1)) as V;
 
 		// Make an estimate of `q2` based on the highest 33 bits of the normalized divisor.
-		// The estimate may be one too large.
-		let num: V = (rem97 >> 32) as V; //////////////////////////////////// TODO - needs to be `D`
-		let q2: D = (num as D) * (inv65 as D) + (TODO);
+		let num: D = rem97 >> 32; // up to 65 bits
+		let num_low: V = num as V; // low 64 bits
+		let num_high: V = (num >> 64) as V; // 65-th bit
+		let q2: D = (num_low as D) * (inv65 as D);
+		let q2: D = q2 + (if num_high != 0 { (inv65 as D) << 64 } else { 0 });
 		let q2: V = (q2 >> 65) as V;
 
 		// correction 1
-		let m: V = q2 * nd33;
-		let fix = num - m >= nd33;
-		let q2: V = q2 + (fix as V);
+		let m: D = (q2 as D) * (nd33 as D);
+		let fix1 = num - m >= (nd33 as D);
+		let q2: V = q2 + (fix1 as V);
 
 		// correction 2
 		let m: D = (q2 as D) * (normalized_divisor as D);
-		let (rem64, fix) = rem97.overflowing_sub(m << 1);
-		let q2: V = q2 - (fix as V);
-		let rem64 = rem64.wrapping_add(if fix { normalized_divisor as D } else { 0 });
+		let (rem64, fix2) = rem97.overflowing_sub(m << 1);
+		let q2: V = q2 - (fix2 as V);
+		let rem64 = rem64.wrapping_add(if fix2 { normalized_divisor as D } else { 0 });
 
 		// Verify that 'q2' and 'rem64' are correct.
 		let check_q2 = rem97 / ((normalized_divisor as D) << 1);
