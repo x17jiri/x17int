@@ -1,4 +1,5 @@
 use crate::base_conv_gen::BASE_CONV;
+use crate::blocks::Invert2By1;
 use crate::blocks::Limb;
 use crate::Error;
 use crate::LimbBuf;
@@ -16,6 +17,7 @@ pub struct BaseConv {
 	pub bits_per_digit_floor: usize, // floor(log2(base) * 65536)
 	pub digits_per_limb_inv: usize,
 	pub last_multiple: Limb,
+	pub last_multiple_inv: Invert2By1,
 	pub multiples: &'static [Limb],
 	//	pub parse_first_segment: fn(input: &[u8]) -> (Limb, usize),
 	//	pub parse_next_segment: fn(segment: &[u8]) -> Limb,

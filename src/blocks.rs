@@ -82,13 +82,14 @@ impl Limb {
 	}
 }
 
-pub struct LimbInv {
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Invert2By1 {
 	divisor: Limb,
 	shift: u16,
 	inv: Limb,
 }
 
-impl LimbInv {
+impl Invert2By1 {
 	pub const fn new(divisor: Limb) -> Self {
 		if divisor.is_zero() {
 			cold_path();
@@ -109,7 +110,7 @@ impl LimbInv {
 		// We will shift the dividend by the same amount, so the result will be unaffected.
 		let shift = divisor.val.leading_zeros() as u16;
 		let normalized_divisor = divisor.val << shift;
-		unsafe { assume(normalized_divisor != 0) };
+		unsafe { assume(normalized_divisor != 0) }
 
 		// `nd33` is the normalized divisor shifted right by 31 bits.
 		// So it has 31 leading zeros and its bith width is 33 bits.
@@ -133,7 +134,7 @@ impl LimbInv {
 		// Make an estimate of `q1` based on the highest 33 bits of the normalized divisor.
 		// By using more than 32 bits, we know the estimate will be at most one too large.
 		let q1: V = Limb::MAX.val / nd33;
-		let mod1: V = Limb::MAX.val % nd33;
+		let nd33_inv: V = q1; // `q1` turns out to also be the 64 bit inverse of `nd33`
 
 		// Fix the estimate if needed, i.e., if `q1 * (normalized_divisor << 33) > divident`.
 		// Since the divident is maximal 128-bit number, the test `multiplication > divident`,
@@ -150,42 +151,34 @@ impl LimbInv {
 
 		//==== Calculate `q2` - the next 32 bits of the quotient ====
 
-		// At the moment, the reminder may be up to 97 bits wide. So we need to do
-		// 65-bit by 33-bit division. For this, we will calculate 65-bit inversion:
-		//     inv65 = floor((2**65 - 1) / nd33)
-		// We already have `q1 = floor((2**64 - 1) / nd33)`. To get `inv65`,
-		// we just need a few adjustments.
-		let inv65: V = (q1 << 1) | ((2 * mod1 + 1) >= nd33) as V;
-		//let inv65: V = (q1 << 1) | (mod1 >= (nd33 >> 1)) as V;
+		// These values are used to verify the correctness of the optimized calculation.
+		let expected_q2: D = rem97 / ((normalized_divisor as D) << 1);
+		let expected_rem65: D = rem97 % ((normalized_divisor as D) << 1);
 
 		// Make an estimate of `q2` based on the highest 33 bits of the normalized divisor.
-		let num: D = rem97 >> 32; // up to 65 bits
-		let num_low: V = num as V; // low 64 bits
-		let num_high: V = (num >> 64) as V; // 65-th bit
-		let q2: D = (num_low as D) * (inv65 as D);
-		let q2: D = q2 + (if num_high != 0 { (inv65 as D) << 64 } else { 0 });
-		let q2: V = (q2 >> 65) as V;
+		let num: V = (rem97 >> 32) as V;
+		let bit32: V = (rem97 >> 96) as V;
+		let num = if bit32 != 0 { num.wrapping_sub(normalized_divisor) } else { num };
+		let q2: V = (((num as D) * (nd33_inv as D)) >> 64) as V;
 
 		// correction 1
-		let m: D = (q2 as D) * (nd33 as D);
-		let fix1 = num - m >= (nd33 as D);
-		let q2: V = q2 + (fix1 as V);
+		let m: V = q2 * nd33;
+		let fix1: V = (num - m >= nd33) as V;
+		let q2: V = (q2 + fix1) | (bit32 << 31);
 
 		// correction 2
 		let m: D = (q2 as D) * (normalized_divisor as D);
-		let (rem64, fix2) = rem97.overflowing_sub(m << 1);
+		let (rem65, fix2) = rem97.overflowing_sub(m << 1);
 		let q2: V = q2 - (fix2 as V);
-		let rem64 = rem64.wrapping_add(if fix2 { normalized_divisor as D } else { 0 });
+		let rem65 = rem65.wrapping_add(if fix2 { normalized_divisor as D } else { 0 });
 
 		// Verify that 'q2' and 'rem64' are correct.
-		let check_q2 = rem97 / ((normalized_divisor as D) << 1);
-		let check_rem64 = rem97 % ((normalized_divisor as D) << 1);
-		debug_assert!(q2 as D == check_q2);
-		debug_assert!(rem64 == check_rem64);
+		debug_assert!(q2 as D == expected_q2);
+		debug_assert!(rem65 == expected_rem65);
 
-		//==== Calculate the lowest bit ====
+		//==== Calculate bit 0 ====
 
-		let bit0 = (rem64 as V) >= normalized_divisor;
+		let bit0 = rem65 >= (normalized_divisor as D);
 
 		//==== Put everything together ====
 
@@ -881,7 +874,7 @@ mod tests {
 
 	#[test]
 	fn test1() {
-		let inv = LimbInv::new(Limb::new(1_000_000_000_000_000_000));
+		let inv = Invert2By1::new(Limb::new(1_000_000_000_000_000_000));
 		let a = Limb::MAX.val;
 		let b = 700_000;
 		let c = Limb::mul(Limb::new(a), Limb::new(b), Limb::ZERO, Limb::ZERO);
