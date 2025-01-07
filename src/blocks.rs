@@ -120,59 +120,62 @@ impl Invert2By1 {
 		// The dividend is `2**128 - 1`.
 		let divident = ((Limb::MAX.val as D) << Limb::BITS) | (Limb::MAX.val as D);
 
-		// Calculate the inverse using u128 division. This value will only be used in debug mode
-		// to verify the correctness of the optimized calculation.
-		let expected_inv: D = divident / (normalized_divisor as D);
-		debug_assert!(expected_inv >> Limb::BITS == 1);
-
 		//==== Calculate `q1` - the highest 32 bits of the quotient ====
-
-		// These values are used to verify the correctness of the optimized calculation.
-		let expected_q1: D = divident / ((normalized_divisor as D) << 33);
-		let expected_rem97: D = divident % ((normalized_divisor as D) << 33);
 
 		// Make an estimate of `q1` based on the highest 33 bits of the normalized divisor.
 		// By using more than 32 bits, we know the estimate will be at most one too large.
 		let q1: V = Limb::MAX.val / nd33;
 		let nd33_inv: V = q1; // `q1` turns out to also be the 64 bit inverse of `nd33`
 
-		// Fix the estimate if needed, i.e., if `q1 * (normalized_divisor << 33) > divident`.
+		// correction - decrement `q1` if needed
+		//
+		// I.e., if `q1 * (normalized_divisor << 33) > divident`.
 		// Since the divident is maximal 128-bit number, the test `multiplication > divident`,
 		// is true if the multiplication has 1 more bit.
 		let m: D = (q1 as D) * (normalized_divisor as D);
+		let m_fixed: D = m.wrapping_sub(normalized_divisor as D);
 		let fix_needed: V = (m >> 95) as V; // 1 if we need a fix, 0 otherwise
 		let q1: V = q1 - fix_needed;
-		let m: D = if fix_needed != 0 { m - (normalized_divisor as D) } else { m };
+		let m: D = if fix_needed != 0 { m_fixed } else { m };
 		let rem97 = !(m << 33); // this is equivalent to: `rem97 = divident - (m << 33)`
 
-		// Verify that 'q1' and 'rem97' are correct.
+		// Verify
+		let expected_q1: D = divident / ((normalized_divisor as D) << 33);
+		let expected_rem97: D = divident % ((normalized_divisor as D) << 33);
 		debug_assert!(q1 as D == expected_q1);
 		debug_assert!(rem97 == expected_rem97);
 
 		//==== Calculate `q2` - the next 32 bits of the quotient ====
 
-		// These values are used to verify the correctness of the optimized calculation.
-		let expected_q2: D = rem97 / ((normalized_divisor as D) << 1);
-		let expected_rem65: D = rem97 % ((normalized_divisor as D) << 1);
-
-		// Make an estimate of `q2` based on the highest 33 bits of the normalized divisor.
+		// We want to calculate an estimate of q2 based on 65 bits of rem97 and 33 bits of
+		// normalized_divisor. In order to save one division operation, we will multiply by inverse.
+		// The multiplication will give us an estimate of the 65 by 33 bit division.
+		// So it's actually an estimate of an estimate of q2.
 		let num: V = (rem97 >> 32) as V;
 		let bit32: V = (rem97 >> 96) as V;
 		let num = if bit32 != 0 { num.wrapping_sub(normalized_divisor) } else { num };
 		let q2: V = (((num as D) * (nd33_inv as D)) >> 64) as V;
 
-		// correction 1
+		// correction 1 - increment `q2` if needed
+		// This will fix the 65 by 33 bit division and produce the estimate of q2.
 		let m: V = q2 * nd33;
-		let fix1: V = (num - m >= nd33) as V;
-		let q2: V = (q2 + fix1) | (bit32 << 31);
+		let fix1_needed: V = (num - m >= nd33) as V;
+		debug_assert!(q2 + fix1_needed == num / nd33);
+		let q2: V = (q2 | (bit32 << 31)) + fix1_needed;
 
-		// correction 2
-		let m: D = (q2 as D) * (normalized_divisor as D);
-		let (rem65, fix2) = rem97.overflowing_sub(m << 1);
-		let q2: V = q2 - (fix2 as V);
-		let rem65 = rem65.wrapping_add(if fix2 { normalized_divisor as D } else { 0 });
+		// correction 2 - decrement `q2` if needed
+		// This will fix the estimate of q2 and produce the final value of q2.
+		//let nd_shl_1 = (normalized_divisor as D) << 1;
+		let nd_shl_1: D = ((normalized_divisor << 1) as D) + ((1 as D) << 64);
+		let m: D = (q2 as D) * nd_shl_1;
+		let (rem65, fix2_needed) = rem97.overflowing_sub(m);
+		let rem65_fixed = rem65.wrapping_add(nd_shl_1);
+		let q2: V = q2 - (fix2_needed as V);
+		let rem65 = if fix2_needed { rem65_fixed } else { rem65 };
 
-		// Verify that 'q2' and 'rem64' are correct.
+		// Verify
+		let expected_q2: D = rem97 / ((normalized_divisor as D) << 1);
+		let expected_rem65: D = rem97 % ((normalized_divisor as D) << 1);
 		debug_assert!(q2 as D == expected_q2);
 		debug_assert!(rem65 == expected_rem65);
 
@@ -183,6 +186,10 @@ impl Invert2By1 {
 		//==== Put everything together ====
 
 		let inv = (q1 << 33) | (q2 << 1) | (bit0 as V);
+
+		// Verify
+		let expected_inv: D = divident / (normalized_divisor as D);
+		debug_assert!(expected_inv >> Limb::BITS == 1);
 		debug_assert!(expected_inv as V == inv);
 
 		Self { divisor, shift, inv: Limb { val: inv } }
@@ -874,6 +881,9 @@ mod tests {
 
 	#[test]
 	fn test1() {
+		let inv = Invert2By1::new(Limb::new(12157665459056928801));
+		let inv = Invert2By1::new(Limb::new(2177953337809371136));
+		let inv = Invert2By1::new(Limb::new(2862423051509815793));
 		let inv = Invert2By1::new(Limb::new(1_000_000_000_000_000_000));
 		let a = Limb::MAX.val;
 		let b = 700_000;
