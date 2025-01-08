@@ -9,14 +9,17 @@
 #![feature(ptr_as_ref_unchecked)]
 #![feature(unchecked_shifts)]
 #![feature(const_eval_select)]
+#![feature(int_roundings)]
 //
 #![allow(non_snake_case)]
 #![allow(unused_imports)]
 #![allow(internal_features)]
 #![allow(incomplete_features)]
-#![allow(non_upper_case_globals)] //
+#![allow(non_upper_case_globals)]
+//
 
 use core::panic;
+use fixed_size::overflowing_add;
 use smallvec::SmallVec;
 use std::alloc::{Allocator, Global, Layout};
 use std::char::MAX;
@@ -33,6 +36,7 @@ pub mod blocks;
 pub mod buf;
 pub mod error;
 pub mod fixed_size;
+pub mod limb;
 pub mod limb_buf;
 pub mod ll;
 pub mod tagged_ptr;
@@ -395,7 +399,7 @@ impl Int {
 		if !Self::are_both_small(a, b) {
 			return None;
 		}
-		let (val, carry) = fixed_size::add(&[a.magn], &[b.magn]);
+		let (val, carry) = overflowing_add(&[a.magn], &[b.magn]);
 		if carry {
 			return None;
 		}
@@ -408,7 +412,7 @@ impl Int {
 		if !Self::are_both_small(a, b) {
 			return None;
 		}
-		let (val, neg) = fixed_size::sub(&[a.magn], &[b.magn]);
+		let (val, neg) = fixed_size::overflowing_sub(&[a.magn], &[b.magn]);
 		Some(Self::new_inline(val[0], a.is_negative() ^ neg))
 	}
 

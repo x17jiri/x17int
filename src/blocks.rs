@@ -8,6 +8,15 @@ pub struct Limb {
 	pub val: usize,
 }
 
+impl std::ops::BitXor for Limb {
+	type Output = Self;
+
+	#[inline]
+	fn bitxor(self, rhs: Self) -> Self {
+		Self { val: self.val ^ rhs.val }
+	}
+}
+
 impl Limb {
 	pub type Value = usize;
 	pub type DoubleValue = u128;
