@@ -29,10 +29,9 @@ use std::intrinsics::{assume, cold_path, likely, unlikely};
 use std::num::NonZeroUsize;
 use thin_vec::ThinVec;
 
-use crate::base_conv::BaseConv;
 use crate::blocks;
-pub use crate::blocks::Limb;
 use crate::error::{assert, Error, ErrorKind};
+pub use crate::limb::Limb;
 /*
 /// Say we have an operation that writes data to a provided buffer, but the buffer may be too small.
 ///
@@ -154,7 +153,7 @@ fn __add_trunc(r: &mut [Limb], a: &[Limb], b: &[Limb]) -> usize {
 		let len;
 		if carry {
 			if rn > an {
-				rp.add(an).write(Limb::ONE);
+				rp.add(an).write(Limb(1));
 				return an.unchecked_add(1);
 			} else {
 				cold_path();
@@ -330,7 +329,7 @@ unsafe fn __mul(
 		let mut re = rp.add(a.len());
 		let be = bp.add(b.len());
 
-		let mut t = blocks::mul_1_unchecked(rp, re, ap, bp.read(), Limb::ZERO);
+		let mut t = blocks::mul_1_unchecked(rp, re, ap, bp.read(), Limb(0));
 		re.write(t);
 
 		rp = rp.add(1);

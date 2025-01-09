@@ -10,6 +10,8 @@
 #![feature(unchecked_shifts)]
 #![feature(const_eval_select)]
 #![feature(int_roundings)]
+#![feature(const_trait_impl)]
+#![feature(stmt_expr_attributes)]
 //
 #![allow(non_snake_case)]
 #![allow(unused_imports)]
@@ -30,8 +32,8 @@ use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 use std::result;
 
-pub mod base_conv;
-pub mod base_conv_gen;
+//pub mod base_conv;
+//pub mod base_conv_gen;
 pub mod blocks;
 pub mod buf;
 pub mod error;
@@ -42,10 +44,11 @@ pub mod ll;
 pub mod tagged_ptr;
 
 //use buf::{Buffer, InlineBuffer};
-use base_conv::BaseConv;
+//use base_conv::BaseConv;
 use error::{assert, Error, ErrorKind};
+use limb::Limb;
 use limb_buf::LimbBuf;
-use ll::{numcpy_est, Limb};
+use ll::numcpy_est;
 use tagged_ptr::TaggedPtr;
 
 #[macro_export]
@@ -135,7 +138,7 @@ pub struct Int {
 
 impl Int {
 	pub fn new_zero() -> Self {
-		Self::new_inline(ll::Limb::ZERO, false)
+		Self::new_inline(ll::Limb(0), false)
 	}
 
 	pub fn new_inline(value: ll::Limb, neg: bool) -> Self {
@@ -157,7 +160,7 @@ impl Int {
 			let buf = ManuallyDrop::new(buf);
 			Ok(Self {
 				vec: TaggedPtr::new(buf.as_non_null_ptr(), neg),
-				magn: ll::Limb { val: len },
+				magn: Limb(len),
 			})
 		} else {
 			cold_path();
@@ -187,8 +190,8 @@ impl Int {
 	}
 
 	#[inline(never)]
-	fn __from_digits(neg: bool, digits: &[u8], base: &BaseConv) -> Result<Self, Error> {
-		/*let limbs = base.digits_to_int_est(digits.len());
+	/*	fn __from_digits(neg: bool, digits: &[u8], base: &BaseConv) -> Result<Self, Error> {
+		let limbs = base.digits_to_int_est(digits.len());
 		if limbs <= Int::ONE_LIMB + 1 {
 			const _: () = assert!(Int::ONE_LIMB + 1 <= MIN_ALLOC_SIZE);
 			let mut buf = [Limb::default(); MIN_ALLOC_SIZE];
@@ -207,9 +210,9 @@ impl Int {
 				e
 			})?;
 			Self::new_with_buf(buf, len, neg)
-		}*/
+		}
 		Err(Error::new_alloc_failed("Int::__from_digits")) // TODO
-	}
+	}*/
 
 	/*	pub fn __from_str(str: &str, base: &BaseConv) -> Result<Self, Error> {
 		const SMALL_BUF_SIZE: usize = 64;
@@ -225,7 +228,7 @@ impl Int {
 		}
 	}*/
 
-	#[inline(never)]
+	/*	#[inline(never)]
 	pub fn from_str_slow(
 		neg: bool, first_limb: Limb, bytes: &[u8], pos: usize,
 	) -> Result<Self, Error> {
@@ -243,9 +246,9 @@ impl Int {
 			base_conv::digits_to_limbs::<10>(digits_buf.as_slice(), first_limb, &mut limb_buf)?;
 
 		Ok(Self::new_zero()) // TODO
-	}
+	}*/
 
-	#[inline(never)]
+	/*	#[inline(never)]
 	pub fn from_str(str: &str) -> Result<Self, Error> {
 		let bytes = str.as_bytes();
 		if bytes.is_empty() {
@@ -268,7 +271,7 @@ impl Int {
 			let bytes = &bytes[pos2..];
 			Self::from_str_slow(neg, short, bytes, pos1 + pos2)
 		}
-	}
+	}*/
 
 	/*	pub fn from_str_with_base(str: &str, base: usize) -> Result<Self, Error> {
 		let base = BaseConv::get(base).ok_or_else(|| {
@@ -309,7 +312,7 @@ impl Int {
 
 	fn __buf_view<'a>(&'a self) -> BufView<'a> {
 		if let Some(large) = self.vec.ptr() {
-			let cap = unsafe { large.offset(-1).read().val };
+			let cap = unsafe { large.offset(-1).read().0 };
 			debug_assert!(cap > 0);
 			let cap = unsafe { NonZeroUsize::new_unchecked(cap) };
 			BufView {
@@ -338,7 +341,7 @@ impl Int {
 				kind: ViewKind::Large,
 				neg: self.is_negative(),
 				limbs: large,
-				len: self.magn.val,
+				len: self.magn.0,
 				phantom: std::marker::PhantomData,
 			}
 		} else {
@@ -428,8 +431,8 @@ impl Int {
 				unsafe { assume(len <= r.cap()) };
 				Self::new_with_buf(r, len, a.neg ^ neg)
 			} else {
-				let val = if len == 0 { 0 } else { r[0].val };
-				Ok(Self::new_inline(Limb { val }, a.neg ^ neg))
+				let val = if len == 0 { Limb(0) } else { r[0] };
+				Ok(Self::new_inline(val, a.neg ^ neg))
 			}
 		} else {
 			let mut r = LimbBuf::new(ll::add_est(&a, &b))?;

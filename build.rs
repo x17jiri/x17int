@@ -1,7 +1,6 @@
 use Vec;
 
 type Limb = usize;
-type DoubleLimb = u128;
 
 const LIMB_BITS: usize = Limb::BITS as usize;
 const LIMB_MAX: usize = Limb::MAX;
@@ -41,7 +40,8 @@ pub fn inv(val: usize) -> (usize, usize) {
 fn base_conv() -> String {
 	let mut base_conv = String::new();
 	base_conv.push_str("use crate::base_conv::{BaseConv, /*parse_first_segment, parse_first_segment_pow2, parse_next_segment, parse_next_segment_pow2*/};\n");
-	base_conv.push_str("use crate::blocks::{Limb, Invert2By1};\n");
+	base_conv.push_str("use crate::limb::Limb;\n");
+	base_conv.push_str("use crate::blocks::Invert2By1;\n");
 	base_conv.push_str("use core::num::NonZeroU8;\n");
 	base_conv.push_str("\n");
 	base_conv
@@ -139,10 +139,9 @@ fn base_conv() -> String {
 		if last_multiple > LIMB_MAX as u128 {
 			base_conv.push_str("\t\t// value overflowed\n");
 		}
-		base_conv
-			.push_str(&format!("\t\tlast_multiple: Limb {{ val: {} }},\n", last_multiple as usize));
+		base_conv.push_str(&format!("\t\tlast_multiple: Limb({}),\n", last_multiple as usize));
 		base_conv.push_str(&format!(
-			"\t\tlast_multiple_inv: Invert2By1::new(Limb {{ val: {} }}),\n",
+			"\t\tlast_multiple_inv: Invert2By1::new(Limb({})),\n",
 			last_multiple as usize
 		));
 		base_conv.push_str("\t\tmultiples: &[\n");
@@ -150,7 +149,7 @@ fn base_conv() -> String {
 			if *m > LIMB_MAX as u128 {
 				base_conv.push_str("\t\t\t// value overflowed\n");
 			}
-			base_conv.push_str(&format!("\t\t\tLimb {{ val: {} }},\n", *m as usize));
+			base_conv.push_str(&format!("\t\t\tLimb({}),\n", *m as usize));
 		}
 		base_conv.push_str("\t\t],\n");
 		base_conv.push_str("\t},\n");

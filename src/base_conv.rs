@@ -1,6 +1,6 @@
 use crate::base_conv_gen::BASE_CONV;
 use crate::blocks::Invert2By1;
-use crate::blocks::Limb;
+use crate::limb::Limb;
 use crate::Error;
 use crate::LimbBuf;
 use crate::{base_conv_gen, blocks};
