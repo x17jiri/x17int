@@ -21,7 +21,6 @@
 //
 
 use core::panic;
-use fixed_size::overflowing_add;
 use smallvec::SmallVec;
 use std::alloc::{Allocator, Global, Layout};
 use std::char::MAX;
@@ -402,8 +401,8 @@ impl Int {
 		if !Self::are_both_small(a, b) {
 			return None;
 		}
-		let (val, carry) = overflowing_add(&[a.magn], &[b.magn]);
-		if carry {
+		let (val, overflow) = fixed_size::add(&[a.magn], &[b.magn]);
+		if overflow {
 			return None;
 		}
 		// `vec: a.vec` copies the sign of a
@@ -415,7 +414,9 @@ impl Int {
 		if !Self::are_both_small(a, b) {
 			return None;
 		}
-		let (val, neg) = fixed_size::overflowing_sub(&[a.magn], &[b.magn]);
+		let val: [Limb; 1];
+		let neg;
+		(val, neg) = fixed_size::sub_abs(&[a.magn], &[b.magn]);
 		Some(Self::new_inline(val[0], a.is_negative() ^ neg))
 	}
 

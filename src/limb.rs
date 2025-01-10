@@ -1,3 +1,4 @@
+use crate::fixed_size;
 use std::intrinsics::{assume, cold_path};
 
 pub type Value = usize;
@@ -59,6 +60,17 @@ impl Limb {
 	#[inline]
 	pub const fn wrapping_sub(self, other: Limb) -> Limb {
 		Limb(self.0.wrapping_sub(other.0))
+	}
+
+	#[inline]
+	pub const fn wrapping_neg(self) -> Limb {
+		Limb(self.0.wrapping_neg())
+	}
+
+	#[inline]
+	pub const fn overflowing_neg(self) -> (Limb, bool) {
+		let (value, overflow) = self.0.overflowing_neg();
+		(Limb(value), overflow)
 	}
 
 	/// Returns:
@@ -151,6 +163,11 @@ impl Limb {
 	#[inline]
 	pub const fn const_inc(self) -> Limb {
 		Limb(self.0 + 1)
+	}
+
+	#[inline]
+	pub const fn const_bitnot(self) -> Limb {
+		Limb(!self.0)
 	}
 }
 
@@ -462,72 +479,4 @@ impl Invert2By1 {
 
 		(q, Limb::from_low_half(rem))
 	}
-}
-
-#[derive(Clone, Copy, Default, Debug)]
-pub struct Invert2By2 {
-	divisor: [Limb; 2],
-	inv: Limb,
-}
-
-impl Invert2By2 {
-	pub const fn new(divisor: [Limb; 2]) -> Self {
-		if divisor[1].is_zero() {
-			// If the high limb is zero, the inverse will not fit into a single limb.
-			cold_path();
-			return Self { divisor, inv: Limb(0) };
-		}
-
-		let n = Limb::make_double(Limb::MAX, Limb::MAX);
-		let d = Limb::make_double(divisor[0], divisor[1]);
-
-		let inv = n / d;
-		debug_assert!(inv >> Limb::BITS == 0);
-
-		Self { divisor, inv: Limb::from_low_half(inv) }
-	}
-
-	#[inline]
-	pub const fn is_valid(&self) -> bool {
-		self.divisor[1].is_not_zero()
-	}
-
-	#[inline]
-	pub const fn divisor(self) -> [Limb; 2] {
-		self.divisor
-	}
-
-	pub const fn qr(self, a: [Limb; 2]) -> (Limb, [Limb; 2]) {
-		let [_q0, q1] = Limb::mul(a[0], self.inv, Limb(0), Limb(0));
-		let [_q1, quot] = Limb::mul(a[1], self.inv, q1, Limb(0));
-
-		let a = Limb::make_double(a[0], a[1]);
-		let divisor = Limb::make_double(self.divisor[0], self.divisor[1]);
-
-		let [m0, m1] = Limb::mul(quot, self.divisor[0], Limb(0), Limb(0));
-		let [m1, m2] = Limb::mul(quot, self.divisor[1], m1, Limb(0));
-
-		debug_assert!(m2.is_zero());
-
-		let mul = Limb::make_double(m0, m1);
-		let rem = a - mul;
-
-		let quot = if rem >= divisor { quot.const_inc() } else { quot };
-		let rem = if rem >= divisor { rem - divisor } else { rem };
-
-		debug_assert!(quot.as_double() == a.div_floor(divisor));
-		debug_assert!(quot.as_double() * divisor + rem == a);
-
-		(quot, [Limb::from_low_half(rem), Limb::from_high_half(rem)])
-	}
-}
-
-#[inline(never)]
-pub fn inv(divisor: [Limb; 2]) -> Invert2By2 {
-	Invert2By2::new(divisor)
-}
-
-#[inline(never)]
-pub fn xmul(inv: Invert2By2, a: [Limb; 2]) -> (Limb, [Limb; 2]) {
-	inv.qr(a)
 }
