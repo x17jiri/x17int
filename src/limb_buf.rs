@@ -6,6 +6,7 @@ use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 
 use crate::error::assert;
+use crate::limb;
 use crate::limb::Limb;
 use crate::ll;
 use crate::Error;
@@ -32,8 +33,9 @@ impl LimbBuf {
 	}
 
 	pub fn cap(&self) -> usize {
+		const _: () = assert!(std::mem::size_of::<limb::Value>() >= std::mem::size_of::<usize>());
 		unsafe {
-			let cap = self.ptr.offset(-1).read().0;
+			let cap = self.ptr.offset(-1).read().0 as usize;
 			debug_assert!(cap > 0);
 			assume(cap > 0);
 			cap
@@ -77,7 +79,7 @@ impl LimbBuf {
 			};
 		let cap = unsafe { NonZeroUsize::new_unchecked(cap) };
 
-		unsafe { ptr.write(Limb(cap.get())) };
+		unsafe { ptr.write(Limb(cap.get() as limb::Value)) };
 		let ptr = unsafe { ptr.offset(1) };
 
 		Ok(Self { ptr })
@@ -115,7 +117,7 @@ impl Drop for LimbBuf {
 	fn drop(&mut self) {
 		unsafe {
 			let ptr = self.ptr.offset(-1);
-			let cap = self.ptr.read().0;
+			let cap = self.ptr.read().0 as usize;
 
 			let size = (cap + 1) * std::mem::size_of::<ll::Limb>();
 			let align = std::mem::align_of::<ll::Limb>();

@@ -1,7 +1,8 @@
 use crate::fixed_size;
+use crate::fixed_size::Uint;
 use std::intrinsics::{assume, cold_path};
 
-pub type Value = usize;
+pub type Value = u64;
 pub type Double = u128;
 
 #[derive(Clone, Copy, Default, PartialEq, Debug, Eq, Ord, PartialOrd)]
@@ -10,7 +11,8 @@ pub struct Limb(pub Value);
 impl Limb {
 	pub const BITS: usize = usize::BITS as usize;
 
-	pub const MAX: Limb = Self(usize::MAX);
+	pub const ZERO: Limb = Self(0);
+	pub const MAX: Limb = Self(Value::MAX);
 
 	#[inline]
 	pub const fn make_double(low: Limb, high: Limb) -> Double {
@@ -73,6 +75,43 @@ impl Limb {
 		(Limb(value), overflow)
 	}
 
+	#[inline]
+	pub const fn overflowing_add(self, other: Limb) -> (Limb, bool) {
+		let (value, overflow) = self.0.overflowing_add(other.0);
+		(Limb(value), overflow)
+	}
+
+	#[inline]
+	pub const fn overflowing_sub(self, other: Limb) -> (Limb, bool) {
+		let (value, overflow) = self.0.overflowing_sub(other.0);
+		(Limb(value), overflow)
+	}
+
+	#[inline]
+	const fn __const_addc(a: Limb, b: Limb, carry: bool) -> (Limb, bool) {
+		let (sum, overflow1) = a.0.overflowing_add(b.0);
+		let (sum, overflow2) = sum.overflowing_add(carry as Value);
+		(Limb(sum), overflow1 | overflow2)
+	}
+
+	#[inline]
+	fn __nonconst_addc(a: Limb, b: Limb, carry: bool) -> (Limb, bool) {
+		#[cfg(target_arch = "x86_64")]
+		unsafe {
+			let c_in = carry as u8;
+			let a = a.0 as u64;
+			let b = b.0 as u64;
+			let mut out: u64 = 0;
+			let c_out = std::arch::x86_64::_addcarry_u64(c_in, a, b, &mut out);
+			return (Limb(out as Value), c_out != 0);
+		}
+
+		#[cfg(not(target_arch = "x86_64"))]
+		{
+			Self::__const_addc(a, b, carry)
+		}
+	}
+
 	/// Returns:
 	///     (value, carry)
 	/// Where:
@@ -80,9 +119,37 @@ impl Limb {
 	///     carry = (a + b + carry) > MAX
 	#[inline]
 	pub const fn addc(a: Limb, b: Limb, carry: bool) -> (Limb, bool) {
-		let (sum, overflow1) = a.0.overflowing_add(b.0);
-		let (sum, overflow2) = sum.overflowing_add(carry as usize);
-		(Limb(sum), overflow1 | overflow2)
+		//return Self::__const_addc(a, b, carry);
+		std::intrinsics::const_eval_select(
+			(a, b, carry), //
+			Self::__const_addc,
+			Self::__nonconst_addc,
+		)
+	}
+
+	#[inline]
+	const fn __const_subb(a: Limb, b: Limb, borrow: bool) -> (Limb, bool) {
+		let (diff, borrow1) = a.0.overflowing_sub(b.0);
+		let (diff, borrow2) = diff.overflowing_sub(borrow as Value);
+		(Limb(diff), borrow1 | borrow2)
+	}
+
+	#[inline]
+	fn __nonconst_subb(a: Limb, b: Limb, borrow: bool) -> (Limb, bool) {
+		#[cfg(target_arch = "x86_64")]
+		unsafe {
+			let c_in = borrow as u8;
+			let a = a.0 as u64;
+			let b = b.0 as u64;
+			let mut out: u64 = 0;
+			let c_out = std::arch::x86_64::_subborrow_u64(c_in, a, b, &mut out);
+			return (Limb(out as Value), c_out != 0);
+		}
+
+		#[cfg(not(target_arch = "x86_64"))]
+		{
+			Self::__const_subb(a, b, borrow)
+		}
 	}
 
 	/// Returns:
@@ -92,9 +159,12 @@ impl Limb {
 	///     borrow = (a - b - borrow) < 0
 	#[inline]
 	pub const fn subb(a: Limb, b: Limb, borrow: bool) -> (Limb, bool) {
-		let (diff, borrow1) = a.0.overflowing_sub(b.0);
-		let (diff, borrow2) = diff.overflowing_sub(borrow as usize);
-		(Limb(diff), borrow1 | borrow2)
+		//return Self::__const_subb(a, b, borrow);
+		std::intrinsics::const_eval_select(
+			(a, b, borrow),
+			Self::__const_subb,
+			Self::__nonconst_subb,
+		)
 	}
 
 	/// Returns:
@@ -168,6 +238,11 @@ impl Limb {
 	#[inline]
 	pub const fn const_bitnot(self) -> Limb {
 		Limb(!self.0)
+	}
+
+	#[inline]
+	pub const fn const_bitand(self, rhs: Limb) -> Limb {
+		Limb(self.0 & rhs.0)
 	}
 }
 
@@ -333,10 +408,43 @@ pub struct Invert2By1 {
 }
 
 impl Invert2By1 {
-	pub const fn new(divisor: Limb) -> Self {
+	pub const fn const_new(divisor: Limb) -> Self {
+		let check = Self::new(divisor);
+
 		if divisor.is_zero() {
 			cold_path();
 			return Self { divisor, shift: 0, inv: Limb(0) };
+		}
+
+		let shift = divisor.leading_zeros();
+		let normalized_divisor = divisor.const_shl(shift);
+		unsafe { assume(normalized_divisor.is_not_zero()) };
+
+		let divident = Limb::make_double(Limb::MAX, Limb::MAX);
+		let inverse = divident.div_floor(normalized_divisor.as_double());
+
+		debug_assert!(divisor.const_eq(check.divisor));
+		debug_assert!(shift == check.shift as usize);
+		debug_assert!(Limb::from_low_half(inverse).const_eq(check.inv));
+
+		Self {
+			divisor,
+			shift: shift as u16,
+			inv: Limb::from_low_half(inverse),
+		}
+	}
+
+	pub const fn new(divisor: Limb) -> Self {
+		const N: usize = 1;
+		let divisor = Uint::new([divisor]);
+
+		if divisor.limbs[N - 1].is_zero() {
+			cold_path();
+			return Self {
+				divisor: divisor.limbs[0], // TODO - return whole array
+				shift: 0,
+				inv: Limb(0),
+			};
 		}
 
 		// For 64 bit limb, the double inverse is calculated as:
@@ -348,22 +456,21 @@ impl Invert2By1 {
 
 		// Left-shift the divisor to remove all leading zeros.
 		// We will shift the dividend by the same amount, so the result will be unaffected.
-		let shift = divisor.leading_zeros();
-		let normalized_divisor = divisor.const_shl(shift);
-		unsafe { assume(normalized_divisor.is_not_zero()) }
+		let shift = divisor.limbs[N - 1].leading_zeros();
+		let normalized_divisor = divisor.small_shl(shift);
 
 		// `nd33` is the normalized divisor shifted right by 31 bits.
 		// So it has 31 leading zeros and its bith width is 33 bits.
-		let nd33 = normalized_divisor.const_shr(31);
-		unsafe { assume(nd33.is_not_zero()) }
+		let nd33 = normalized_divisor.limbs[N - 1].const_shr(31);
 
 		// The dividend is `2**128 - 1`.
-		let divident = Limb::make_double(Limb::MAX, Limb::MAX);
+		let divident = Uint::<{ N + 1 }>::max();
 
 		//==== Calculate `q1` - the highest 32 bits of the quotient ====
 
 		// Make an estimate of `q1` based on the highest 33 bits of the normalized divisor.
 		// By using more than 32 bits, we know the estimate will be at most one too large.
+		unsafe { assume(nd33.is_not_zero()) };
 		let nd33_inv = nd33.invert();
 		let q1 = nd33_inv.mul_max();
 
@@ -372,59 +479,62 @@ impl Invert2By1 {
 		// I.e., if `q1 * (normalized_divisor << 33) > divident`.
 		// Since the divident is maximal 128-bit number, `multiplication > divident` is true
 		// if the multiplication has 1 more bit.
-		let m = q1.const_mul(normalized_divisor);
-		let fix_needed = Limb::from_high_half(m >> 95); // 1 if we need a fix, 0 otherwise
+		let m: Uint<{ N + 1 }> = normalized_divisor.mul(Uint::new([q1]));
+		let fix_needed = m.limbs[N].const_shr(31); // 1 if we need a fix, 0 otherwise
 		let q1 = q1.const_sub(fix_needed);
-		let m = #[rustfmt::skip]
-			if fix_needed.is_not_zero() { m.wrapping_sub(normalized_divisor.as_double()) } else { m };
-		let rem97 = !(m << 33); // this is equivalent to: `rem97 = divident - (m << 33)`
+		let (m, _) = m.sub(normalized_divisor.mask(fix_needed.wrapping_neg()).resize());
+		let rem97 = m.small_shl(33).not(); // this is equivalent to: `rem97 = divident - (m << 33)`
 
 		// Verify
-		let expected_q1 = divident / (normalized_divisor.as_double() << 33);
-		let expected_rem97 = divident % (normalized_divisor.as_double() << 33);
-		debug_assert!(q1.as_double() == expected_q1);
-		debug_assert!(rem97 == expected_rem97);
+		let check1 = normalized_divisor.small_shl_extend(33);
+		debug_assert!(rem97.lt(check1));
+		// (normalized_divisor << 33) * q1 + rem97 == divident
+		let check2 = check1.mul(Uint::new([q1])).add_extend(rem97.resize());
+		debug_assert!(check2.eq(divident.resize()));
 
 		//==== Calculate `q2` - the next 32 bits of the quotient ====
 
 		// We want to calculate an estimate of q2 based on 65 bits of rem97 and 33 bits of
 		// normalized_divisor. First remove the 65-th bit so that the division is 64 by 33 bits.
-		let bit65 = Limb::from_low_half(rem97 >> 96);
-		let num = Limb::from_low_half(rem97 >> 32);
-		let num = if bit65.is_not_zero() { num.wrapping_sub(normalized_divisor) } else { num };
-		let q2 = nd33_inv.mul(num).const_bitor(bit65.const_shl(31));
+		let num = rem97.small_shr(32);
+		let bit65 = num.limbs[N];
+		let (num, _) = num.resize::<N>().sub(normalized_divisor.mask(bit65.wrapping_neg()));
+		let q2 = nd33_inv.mul(num.limbs[N - 1]).const_bitor(bit65.const_shl(31));
 
 		// correction - decrement `q2` if needed
 
-		// This could just be `normalized_divisor.as_double() << 1`, but making it explicit that
-		// the highest bit is always one helps the compiler optimize.
-		let nd_shl_1 = Limb::make_double(normalized_divisor.const_shl(1), Limb(1));
+		let mut nd_shl_1 = normalized_divisor.small_shl_extend(1);
+		nd_shl_1.limbs[N].0 = 1;
 
-		let m = q2.as_double() * nd_shl_1;
-		let (rem65, fix2_needed) = rem97.overflowing_sub(m);
-		let q2 = if fix2_needed { q2.const_sub(Limb(1)) } else { q2 };
-		let rem65 = if fix2_needed { rem65.wrapping_add(nd_shl_1) } else { rem65 };
+		let m = nd_shl_1.mul(Uint::new([q2]));
+		let (rem65, fix2_needed) = rem97.sub(m.resize());
+		let q2 = q2.wrapping_sub(Limb::from_bool(fix2_needed));
+		let (rem65, _) = rem65.add(if fix2_needed { nd_shl_1 } else { Uint::zero() });
 
 		// Verify
-		let expected_q2 = rem97 / (normalized_divisor.as_double() << 1);
+		/*		let expected_q2 = rem97 / (normalized_divisor.as_double() << 1);
 		let expected_rem65 = rem97 % (normalized_divisor.as_double() << 1);
 		debug_assert!(q2.as_double() == expected_q2);
-		debug_assert!(rem65 == expected_rem65);
+		debug_assert!(rem65 == expected_rem65);*/
 
 		//==== Calculate bit 0 ====
 
-		let bit0 = rem65 >= normalized_divisor.as_double();
+		let bit0 = rem65.ge(normalized_divisor.resize());
 
 		//==== Put everything together ====
 
 		let inv = q1.const_shl(33).const_bitor(q2.const_shl(1)).const_bitor(Limb::from_bool(bit0));
 
 		// Verify
-		let expected_inv = divident / normalized_divisor.as_double();
+		/*		let expected_inv = divident / normalized_divisor.as_double();
 		debug_assert!(expected_inv >> Limb::BITS == 1);
-		debug_assert!(Limb::from_low_half(expected_inv).const_eq(inv));
+		debug_assert!(Limb::from_low_half(expected_inv).const_eq(inv));*/
 
-		Self { divisor, shift: shift as u16, inv }
+		Self {
+			divisor: divisor.limbs[0],
+			shift: shift as u16,
+			inv,
+		}
 	}
 
 	pub const fn is_valid(&self) -> bool {
@@ -478,5 +588,24 @@ impl Invert2By1 {
 		let q = if need_correction { q.const_inc() } else { q };
 
 		(q, Limb::from_low_half(rem))
+	}
+}
+
+mod tests {
+	use super::*;
+
+	use crate::testvec;
+
+	#[test]
+	fn test1() {
+		let inv = Invert2By1::const_new(Limb(12157665459056928801));
+		let inv = Invert2By1::const_new(Limb(2177953337809371136));
+		let inv = Invert2By1::const_new(Limb(2862423051509815793));
+		let inv = Invert2By1::const_new(Limb(1_000_000_000_000_000_000));
+		let a = Limb::MAX;
+		let b = Limb(700_000);
+		let c = Limb::mul(a, b, Limb(0), Limb(0));
+		let (q, r) = inv.mul(c); //[Limb::new(a), Limb::new(b)]);
+		println!("q = {:?}, r = {:?}", q, r);
 	}
 }

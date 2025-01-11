@@ -31,8 +31,8 @@ use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 use std::result;
 
-//pub mod base_conv;
-//pub mod base_conv_gen;
+pub mod base_conv;
+pub mod base_conv_gen;
 pub mod blocks;
 pub mod buf;
 pub mod error;
@@ -159,7 +159,7 @@ impl Int {
 			let buf = ManuallyDrop::new(buf);
 			Ok(Self {
 				vec: TaggedPtr::new(buf.as_non_null_ptr(), neg),
-				magn: Limb(len),
+				magn: Limb(len as limb::Value),
 			})
 		} else {
 			cold_path();
@@ -311,7 +311,7 @@ impl Int {
 
 	fn __buf_view<'a>(&'a self) -> BufView<'a> {
 		if let Some(large) = self.vec.ptr() {
-			let cap = unsafe { large.offset(-1).read().0 };
+			let cap = unsafe { large.offset(-1).read().0 as usize };
 			debug_assert!(cap > 0);
 			let cap = unsafe { NonZeroUsize::new_unchecked(cap) };
 			BufView {
@@ -340,7 +340,7 @@ impl Int {
 				kind: ViewKind::Large,
 				neg: self.is_negative(),
 				limbs: large,
-				len: self.magn.0,
+				len: self.magn.0 as usize,
 				phantom: std::marker::PhantomData,
 			}
 		} else {
@@ -401,12 +401,14 @@ impl Int {
 		if !Self::are_both_small(a, b) {
 			return None;
 		}
-		let (val, overflow) = fixed_size::add(&[a.magn], &[b.magn]);
+		let x = fixed_size::Uint::new([a.magn]);
+		let y = fixed_size::Uint::new([b.magn]);
+		let (val, overflow) = x.add(y);
 		if overflow {
 			return None;
 		}
 		// `vec: a.vec` copies the sign of a
-		Some(Int { vec: a.vec, magn: val[0] })
+		Some(Int { vec: a.vec, magn: val.limbs[0] })
 	}
 
 	#[inline(always)]
@@ -414,10 +416,10 @@ impl Int {
 		if !Self::are_both_small(a, b) {
 			return None;
 		}
-		let val: [Limb; 1];
-		let neg;
-		(val, neg) = fixed_size::sub_abs(&[a.magn], &[b.magn]);
-		Some(Self::new_inline(val[0], a.is_negative() ^ neg))
+		let x = fixed_size::Uint::new([a.magn]);
+		let y = fixed_size::Uint::new([b.magn]);
+		let (val, neg) = x.sub_abs(y);
+		Some(Self::new_inline(val.limbs[0], a.is_negative() ^ neg))
 	}
 
 	#[inline(never)]

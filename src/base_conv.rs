@@ -1,5 +1,6 @@
 use crate::base_conv_gen::BASE_CONV;
-use crate::blocks::Invert2By1;
+use crate::limb;
+use crate::limb::Invert2By1;
 use crate::limb::Limb;
 use crate::Error;
 use crate::LimbBuf;
@@ -209,21 +210,21 @@ impl BaseConv {
 }
 
 const fn digits_per_limb(base: usize) -> (usize, Limb) {
-	let mut m = base as Limb::DoubleValue;
+	let mut m = base as limb::Double;
 	let mut big_base = m;
 	let mut digits_per_limb = 1;
 	loop {
-		m *= base as Limb::DoubleValue;
-		if m > ((1 as Limb::DoubleValue) << Limb::BITS) {
+		m *= base as limb::Double;
+		if m > ((1 as limb::Double) << Limb::BITS) {
 			break;
 		}
 
 		big_base = m;
 		digits_per_limb += 1;
 	}
-	(digits_per_limb, Limb { val: big_base as Limb::Value })
+	(digits_per_limb, Limb(big_base as limb::Value))
 }
-
+/*
 #[inline(never)]
 pub fn parse_short<const BASE: usize>(bytes: &[u8], mapping: &[i8; 256]) -> (Limb, usize) {
 	let (digits_per_limb, _big_base) = const { digits_per_limb(BASE) };
@@ -382,7 +383,7 @@ pub fn digits10_to_limbs(
 ) -> Result<(Option<LimbBuf>, usize), Error> {
 	digits_to_limbs::<10>(digits, first_limb, limbs)
 }
-
+*/
 /*
 #[inline(never)]
 pub fn parse_first_segment_pow2<const BASE: usize>(input: &[u8]) -> (Limb, usize) {

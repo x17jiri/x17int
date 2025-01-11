@@ -139,6 +139,7 @@ pub unsafe fn cold_trim_unchecked(p: *const Limb, i: usize, n: usize) -> usize {
 //--------------------------------------------------------------------------------------------------
 // add
 
+#[inline(never)]
 pub unsafe fn add_n_unchecked(
 	rp: *mut Limb, ap: *const Limb, bp: *const Limb, i: usize, n: usize,
 ) -> bool {
@@ -178,7 +179,7 @@ pub unsafe fn add_carry_unchecked(
 				return true;
 			}
 
-			let (sum, overflow) = Limb::addc(ap.read(), Limb(0), carry);
+			let (sum, overflow) = ap.read().overflowing_add(Limb(1));
 			rp.write(sum);
 			carry = overflow;
 
@@ -206,7 +207,7 @@ pub unsafe fn neg_add_carry_unchecked(
 				return true;
 			}
 
-			let (sum, overflow) = Limb::addc(!ap.add(i).read(), Limb(0), carry);
+			let (sum, overflow) = (!ap.add(i).read()).overflowing_add(Limb(1));
 			rp.add(i).write(sum);
 			carry = overflow;
 
@@ -224,7 +225,7 @@ pub unsafe fn add_1_unchecked(rp: *mut Limb, ap: *const Limb, b: Limb, i: usize,
 	debug_assert!(has_no_overlap(rp, n, ap, n));
 	unsafe {
 		let a = ap.add(i).read();
-		let (sum, carry) = Limb::addc(a, b, false);
+		let (sum, carry) = a.overflowing_add(b);
 		rp.add(i).write(sum);
 		add_carry_unchecked(rp, ap, carry, i.unchecked_add(1), n)
 	}
@@ -239,7 +240,7 @@ pub unsafe fn add_carry_unchecked_(rp: *mut Limb, re: *mut Limb, carry: bool) ->
 				return true;
 			}
 
-			let (sum, overflow) = Limb::addc(rp.read(), Limb(0), carry);
+			let (sum, overflow) = rp.read().overflowing_add(Limb(1));
 			rp.write(sum);
 			carry = overflow;
 
@@ -254,7 +255,7 @@ pub unsafe fn add_carry_unchecked_(rp: *mut Limb, re: *mut Limb, carry: bool) ->
 pub unsafe fn add_1_unchecked_(rp: *mut Limb, re: *mut Limb, b: Limb) -> bool {
 	debug_assert!(rp < re);
 	unsafe {
-		let (sum, carry) = Limb::addc(rp.read(), b, false);
+		let (sum, carry) = rp.read().overflowing_add(b);
 		rp.write(sum);
 		add_carry_unchecked_(rp.add(1), re, carry)
 	}
@@ -263,6 +264,7 @@ pub unsafe fn add_1_unchecked_(rp: *mut Limb, re: *mut Limb, b: Limb) -> bool {
 //--------------------------------------------------------------------------------------------------
 // sub
 
+#[inline(never)]
 pub unsafe fn sub_n_unchecked(
 	rp: *mut Limb, ap: *const Limb, bp: *const Limb, i: usize, n: usize,
 ) -> bool {
@@ -305,7 +307,7 @@ pub unsafe fn sub_borrow_unchecked(
 				break;
 			}
 
-			let (diff, underflow) = Limb::subb(ap.read(), Limb(0), borrow);
+			let (diff, underflow) = ap.read().overflowing_sub(Limb(1));
 			rp.write(diff);
 			borrow = underflow;
 
@@ -322,7 +324,7 @@ pub unsafe fn sub_1_unchecked(rp: *mut Limb, ap: *const Limb, b: Limb, i: usize,
 	debug_assert!(has_no_overlap(rp, n, ap, n));
 	unsafe {
 		let a = ap.add(i).read();
-		let (d, borrow) = Limb::subb(a, b, false);
+		let (d, borrow) = a.overflowing_sub(b);
 		rp.add(i).write(d);
 		sub_borrow_unchecked(rp, ap, borrow, i.unchecked_add(1), n)
 	}
@@ -334,7 +336,6 @@ pub unsafe fn sub_1_unchecked(rp: *mut Limb, ap: *const Limb, b: Limb, i: usize,
 /// Preconditions:
 /// - n > 0
 /// - a.len() > 0
-#[inline(never)]
 pub unsafe fn mul_1_unchecked(
 	rp: *mut Limb, re: *mut Limb, ap: *const Limb, b: Limb, c: Limb,
 ) -> Limb {
@@ -356,7 +357,6 @@ pub unsafe fn mul_1_unchecked(
 }
 
 /// In-place version of `mul_1_unchecked()`.
-#[inline(never)]
 pub unsafe fn mul_1_unchecked_(rp: *mut Limb, re: *mut Limb, b: Limb, c: Limb) -> Limb {
 	unsafe {
 		let mut rp = rp;
@@ -378,7 +378,6 @@ pub fn mul_1_(r: &mut [Limb], b: Limb, c: Limb) -> Limb {
 	unsafe { mul_1_unchecked_(r.as_mut_ptr(), r.as_mut_ptr().add(r.len()), b, c) }
 }
 
-#[inline(never)]
 pub unsafe fn addmul_1_unchecked(rp: *mut Limb, re: *mut Limb, ap: *const Limb, b: Limb) -> Limb {
 	unsafe {
 		let mut rp = rp;
@@ -626,17 +625,4 @@ mod tests {
 		}
 	}
 	*/
-
-	#[test]
-	fn test1() {
-		let inv = Invert2By1::new(Limb(12157665459056928801));
-		let inv = Invert2By1::new(Limb(2177953337809371136));
-		let inv = Invert2By1::new(Limb(2862423051509815793));
-		let inv = Invert2By1::new(Limb(1_000_000_000_000_000_000));
-		let a = Limb::MAX;
-		let b = Limb(700_000);
-		let c = Limb::mul(a, b, Limb(0), Limb(0));
-		let (q, r) = inv.mul(c); //[Limb::new(a), Limb::new(b)]);
-		println!("q = {:?}, r = {:?}", q, r);
-	}
 }
